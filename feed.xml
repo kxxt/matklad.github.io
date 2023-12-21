@@ -1,0 +1,1879 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<link href="https://matklad.github.io/feed.xml" rel="self" type="application/atom+xml"/>
+<link href="https://matklad.github.io" rel="alternate" type="text/html"/>
+<updated>2023-12-21T10:27:58.974Z</updated>
+<id>https://matklad.github.io/feed.xml</id>
+<title type="html">matklad</title>
+<subtitle>Yet another programming blog by Alex Kladov aka matklad.</subtitle>
+<author><name>Alex Kladov</name></author>
+
+<entry>
+<title type="text">Retry Loop</title>
+<link href="https://matklad.github.io/2023/12/21/retry-loop.html" rel="alternate" type="text/html" title="Retry Loop" />
+<published>2023-12-21T00:00:00+00:00</published>
+<updated>2023-12-21T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/12/21/retry-loop</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[A post about writing a retry loop. Not a smart post about avoiding thundering heards and resonance.
+A simpleton kind of post about wrangling ifs and fors together to minimize bugs.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/12/21/retry-loop.html"><![CDATA[
+    <h1>
+    <a href="#Retry-Loop"><span>Retry Loop</span> <time datetime="2023-12-21">Dec 21, 2023</time></a>
+    </h1>
+<p><span>A post about writing a retry loop. Not a smart post about avoiding thundering heards and resonance.</span>
+<span>A simpleton kind of post about wrangling ifs and fors together to minimize bugs.</span></p>
+<p><em><span>Stage:</span></em><span> you are writing a script for some build automation or some such.</span></p>
+<p><em><span>Example problem:</span></em><span> you want to get a freshly deployed package from Maven Central. As you learn after</span>
+<span>a CI failure, packages in Maven don</span>&rsquo;<span>t become available immediately after a deploy, there could be a</span>
+<span>delay. This is a poor API which breaks causality and makes it impossible to code correctly against,</span>
+<span>but what over alternative do you have? You just need to go and write a retry loop.</span></p>
+<p><span>You want to retry some </span><code>action</code><span>. The action either succeeds or fails. Some, but not all, failures</span>
+<span>are transient and can be retried after a timeout. If a failure persists after a bounded number</span>
+<span>of retries, it should be propagated.</span></p>
+<p><span>The </span><em><span>runtime</span></em><span> sequence of event we want to see is:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">action()</span>
+<span class="line">sleep()</span>
+<span class="line">action()</span>
+<span class="line">sleep()</span>
+<span class="line">action()</span></code></pre>
+
+</figure>
+<p><span>It has that mightily annoying a-loop-and-a-half shape.</span></p>
+<p><span>Here</span>&rsquo;<span>s the set of properties I would like to see in a solution:</span></p>
+<ol>
+<li>
+<span>No useless sleep. A naive loop would sleep one extra time before reporting a retry failure, but</span>
+<span>we don</span>&rsquo;<span>t want to do that.</span>
+</li>
+<li>
+<span>In the event of a retry failure, the underlying error is reported. I don</span>&rsquo;<span>t want to see </span><em><span>just</span></em>
+<span>that all attempts failed, I want to see an actual error from the last attempt.</span>
+</li>
+<li>
+<span>Obvious upper bound: I don</span>&rsquo;<span>t want to write a </span><code>while (true)</code><span> loop with a break in the middle. If I</span>
+<span>am to do at most 5 attempts, I want to see a </span><code>for (0..5)</code><span> loop. Don</span>&rsquo;<span>t ask me</span>
+<a href="https://github.com/tigerbeetle/tigerbeetle/pull/1367"><span>why</span></a><span>.</span>
+</li>
+<li>
+<span>No syntactic redundancy </span>&mdash;<span> there should be a single call to action and a single sleep in the</span>
+<span>source code.</span>
+</li>
+</ol>
+<p><span>I don</span>&rsquo;<span>t know how to achieve all four. That</span>&rsquo;<span>s the best I can do:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span><span class="hl-function"> action</span>() <span class="hl-operator">!</span><span class="hl-keyword">enum</span> { ok, retry: <span class="hl-type">anyerror</span> } {</span>
+<span class="line"></span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span><span class="hl-function"> retry_loop</span>() <span class="hl-operator">!</span><span class="hl-type">void</span> {</span>
+<span class="line">    <span class="hl-keyword">for</span> (<span class="hl-numbers">0</span>..<span class="hl-numbers">5</span>) {</span>
+<span class="line">        <span class="hl-keyword">if</span> (<span class="hl-keyword">try</span> action() <span class="hl-operator">==</span> .ok) <span class="hl-keyword">break</span>;</span>
+<span class="line">        sleep();</span>
+<span class="line">    } <span class="hl-keyword">else</span> {</span>
+<span class="line">        <span class="hl-keyword">switch</span> (<span class="hl-keyword">try</span> action()) {</span>
+<span class="line">            .ok =&gt; {},</span>
+<span class="line">            .retry =&gt; <span class="hl-operator">|</span>err<span class="hl-operator">|</span> <span class="hl-keyword">return</span> err</span>
+<span class="line">        }</span>
+<span class="line">    }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>This solution achieves 1-3, fails at 4, and relies on a somewhat esoteric language feature </span>&mdash;
+<code>for/else</code><span>.</span></p>
+<p><span>Salient points:</span></p>
+<ul>
+<li>
+<p><span>Because there is a syntactic repetition in call to action, it is imperative to extract it into a</span>
+<span>function.</span></p>
+</li>
+<li>
+<p><span>The return type of </span><code>action</code><span> has to be elaborate. There are tree possibilities:</span></p>
+<ul>
+<li>
+<span>an action succeeds,</span>
+</li>
+<li>
+<span>an action fails fatally, error must be propagated,</span>
+</li>
+<li>
+<span>an action fails with a transient error, a retry can be attempted.</span>
+</li>
+</ul>
+<p><span>For the transient failure case, it is important to return an error object itself, so that the real</span>
+<span>error can be propagated if a retry fails.</span></p>
+</li>
+<li>
+<p><span>The core is a bounded </span><code>for (0..5)</code><span> loop. Can</span>&rsquo;<span>t mess that up!</span></p>
+</li>
+<li>
+<p><span>For </span>&ldquo;<span>and a half</span>&rdquo;<span> aspect, an </span><code>else</code><span> is used. Here we incur syntactic repetition, but that feels</span>
+<span>some what justified, as the last call </span><em><span>is</span></em><span> actually special, as it rethrows the error, rather than</span>
+<span>just swallowing it.</span></p>
+</li>
+</ul>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">Non-Send Futures When?</title>
+<link href="https://matklad.github.io/2023/12/10/nsfw.html" rel="alternate" type="text/html" title="Non-Send Futures When?" />
+<published>2023-12-10T00:00:00+00:00</published>
+<updated>2023-12-10T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/12/10/nsfw</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[Ever since reading
+What If We Pretended That a Task = Thread?
+I can't stop thinking about borrowing non-Sync data across .await.
+In this post, I'd love to take one more look at the problem.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/12/10/nsfw.html"><![CDATA[
+    <h1>
+    <a href="#Non-Send-Futures-When"><span>Non-Send Futures When?</span> <time datetime="2023-12-10">Dec 10, 2023</time></a>
+    </h1>
+<p><span>Ever since reading</span>
+<a href="https://blaz.is/blog/post/lets-pretend-that-task-equals-thread/" class="display"><em><span>What If We Pretended That a Task = Thread?</span></em></a>
+<span>I can</span>&rsquo;<span>t stop thinking about borrowing non-</span><code>Sync</code><span> data across </span><code>.await</code><span>.</span>
+<span>In this post, I</span>&rsquo;<span>d love to take one more look at the problem.</span></p>
+<section id="Send-And-Sync">
+
+    <h2>
+    <a href="#Send-And-Sync"><span>Send And Sync</span> </a>
+    </h2>
+<p><span>To warm up, a refresher on</span>
+<a href="https://doc.rust-lang.org/stable/std/marker/trait.Send.html"><code>Send</code></a><span> and</span>
+<a href="https://doc.rust-lang.org/stable/std/marker/trait.Sync.html"><code>Sync</code></a><span> auto-traits.</span>
+<span>These traits are a </span><em><span>library</span></em><span> feature that enable fearless concurrency </span>&mdash;<span> a statically checked</span>
+<span>guarantee that non-thread-safe data structures don</span>&rsquo;<span>t escape from their original thread.</span></p>
+<p><span>Why do we need two traits, rather than just a single </span><code>ThreadSafe</code><span>? Because there are two degrees of</span>
+<span>thread-unsafety.</span></p>
+<p><span>Some types are fine to use from multiple threads, as long as only a single thread at a time uses a</span>
+<span>particular value. An example here would be a </span><code>Cell&lt;i32&gt;</code><span>. If two threads have a reference to a cell</span>
+<span>at the same time, a </span><code>&amp;Cell&lt;i32&gt;</code><span>, we are in trouble </span>&mdash;<span> </span><code>Cell</code>&rsquo;<span>s loads and stores are not atomic</span>
+<span>and are UB by definition if used concurrently. However, if two different threads have exclusive</span>
+<span>access to a </span><code>Cell</code><span>, that</span>&rsquo;<span>s fine </span>&mdash;<span> because the access is exclusive, it necessary means that it is</span>
+<span>not simultaneous. That is, it</span>&rsquo;<span>s OK for thread A to </span><em><span>send</span></em><span> a </span><code>Cell&lt;i32&gt;</code><span> to a different thread B,</span>
+<span>as long as A itself loses access to the cell.</span></p>
+<p><span>But there are also types which are unsafe to use from multiple threads even if only a single thread</span>
+<span>at a time has access to a value. An example here would be an </span><code>Arc&lt;Cell&lt;i32&gt;&gt;</code><span>. It</span>&rsquo;<span>s not possible</span>
+<span>to safety send such an </span><code>Arc</code><span> to a different thread, because a </span><code>.clone</code><span> call can be used to get an</span>
+<span>independent copy of an </span><code>Arc</code><span>, effectively creating a </span><em><span>share</span></em><span> operation out of a </span><em><span>send</span></em><span> one.</span></p>
+<p><span>But turns out both cases are covered by just a single trait, </span><code>Send</code><span>. The thing is, to </span><em><span>share</span></em><span> a</span>
+<code>Cell&lt;i32&gt;</code><span> across two threads, it is necessary to </span><em><span>send</span></em><span> an </span><code>&amp;Cell&lt;i32&gt;</code><span>. So we get the following</span>
+<span>table:</span></p>
+<table>
+<tr>
+<th style="text-align: left;"><code>Send</code><span></span></th>
+<th style="text-align: left;"><code>!Send</code><span></span></th>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Cell&lt;i32&gt;</code></td>
+<td style="text-align: left;"><code>&amp;Cell&lt;i32&gt;</code><span></span></td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>i32</code><span></span></td>
+<td style="text-align: left;"><code>Arc&lt;Cell&lt;i32&gt;&gt;</code><span></span></td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>&amp;i32</code><span></span></td>
+<td style="text-align: left;"><code>&amp;Arc&lt;Cell&lt;i32&gt;&gt;</code></td>
+</tr>
+</table>
+<p><span>If </span><code>T</code><span> is </span><code>Send</code><span>, </span><code>&amp;T</code><span> might or might not be </span><code>Send</code><span>. And that</span>&rsquo;<span>s where the </span><code>Sync</code><span> traits</span>
+<span>comes from: </span><code>&amp;T: Send</code><span> if and only if (iff) </span><code>T: Sync</code><span>. Which gives the following table:</span></p>
+<table>
+<tr>
+<td></td>
+<td><strong><code>Send</code></strong><span></span></td>
+<td><strong><code>!Send</code></strong><span></span></td>
+</tr>
+<tr>
+<td><strong><code>Sync</code></strong><span></span></td>
+<td><code>i32</code><span></span></td>
+<td></td>
+</tr>
+<tr>
+<td><strong><code>!Sync</code></strong><span></span></td>
+<td><code>Cell&lt;i32&gt;</code><span></span></td>
+<td><code>Arc&lt;Cell&lt;i32&gt;&gt;</code></td>
+</tr>
+</table>
+<p><span>What about that last empty cell? Types which are </span><code>Sync</code><span> and </span><code>!Send</code><span> are indeed quite rare, and I</span>
+<span>don</span>&rsquo;<span>t know examples which don</span>&rsquo;<span>t boil down to </span>&ldquo;<span>underlying API mandates that a type doesn</span>&rsquo;<span>t leave a</span>
+<span>thread</span>&rdquo;<span>. One example here would be </span><code>MutexGuard</code><span> from the standard library </span>&mdash;<span> pthreads </span><em><span>require</span></em>
+<span>that only the thread that originally locked a mutex can unlock it. This isn</span>&rsquo;<span>t a fundamental</span>
+<span>requirement for a mutex </span>&mdash;<span> a </span><code>MutexGuard</code><span> from parking lot</span>
+<a href="https://github.com/Amanieu/parking_lot/tree/adbad82729d4843a051defb9e9eff38c83e7f289?tab=readme-ov-file#usage"><span>can be </span><code>Send</code></a><span>.</span></p>
+</section>
+<section id="Thread-Safety-And-Async">
+
+    <h2>
+    <a href="#Thread-Safety-And-Async"><span>Thread Safety And Async</span> </a>
+    </h2>
+<p><span>As you see, the </span><code>Send</code><span> &amp; </span><code>Sync</code><span> infrastructure is quite intricate. Is it worth it? Absolutely, as it</span>
+<span>leads to simpler code. In Rust, you can explicitly designate certain parts of a code base as</span>
+<span>non-thread-safe, and then avoid worrying about threads, because compiler will catch your hand if you</span>
+<em><span>accidentally</span></em><span> violate this constraint.</span></p>
+<p><span>The power of Rust is not defensively making everything thread safe, its the ability to use</span>
+<span>thread-unsafe code fearlessly.</span></p>
+<p><span>And it seems like </span><code>async</code><span> doesn</span>&rsquo;<span>t quite have this power. Let</span>&rsquo;<span>s build an example, a litmus test!</span></p>
+<p><span>Let</span>&rsquo;<span>s start with a </span><code>Context</code><span> pattern,  where a bunch of stuff is grouped into a single struct, so</span>
+<span>that they can be threaded through the program as one parameter. Such </span><code>Context</code><span> object is usually</span>
+<span>scoped to a particular operation </span>&mdash;<span> the ultimate owner of </span><code>Context</code><span> is a local variable in some</span>
+<span>top-level </span>&ldquo;<span>main</span>&rdquo;<span> function, it is threaded as </span><code>&amp;Context</code><span> or </span><code>&amp;mut Context</code><span> everywhere, and usually</span>
+<span>isn</span>&rsquo;<span>t stored anywhere. For the </span><code>&amp;Context</code><span> variant, it is also customary to add some interior</span>
+<span>mutability for things like caches. One real-life example would be a </span><code>Config</code><span> type from Cargo:</span>
+<a href="https://github.com/rust-lang/cargo/blob/a092469d46c0d7e8d899dbaebfcddf052f8f435d/src/cargo/util/config/mod.rs#L168"><span>config/mod.rs#L168</span></a><span>.</span></p>
+<p><span>Distilling the pattern down, we get something like this:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-meta">#[derive(Default)]</span></span>
+<span class="line"><span class="hl-keyword">pub</span> <span class="hl-keyword">struct</span> <span class="hl-title class_">Context</span> {</span>
+<span class="line">  counter: Cell&lt;<span class="hl-type">i32</span>&gt;</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">impl</span> <span class="hl-title class_">Context</span> {</span>
+<span class="line">  <span class="hl-keyword">fn</span> <span class="hl-title function_">increment</span>(&amp;<span class="hl-keyword">self</span>) {</span>
+<span class="line">    <span class="hl-keyword">self</span>.counter.<span class="hl-title function_ invoke__">set</span>(<span class="hl-keyword">self</span>.counter.<span class="hl-title function_ invoke__">get</span>() + <span class="hl-number">1</span>);</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>Here, a </span><code>counter</code><span> is a interior-mutable value which could, e.g., track cache hit rate. And here how</span>
+<span>this type could be used:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">f</span>(context: &amp;Context) {</span>
+<span class="line">  <span class="hl-title function_ invoke__">g</span>(context);</span>
+<span class="line">  context.<span class="hl-title function_ invoke__">increment</span>();</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">g</span>(_context: &amp;Context) {</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>However, the async version of the code doesn</span>&rsquo;<span>t really work, and in a subtle way:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">async</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">f</span>(context: &amp;Context) {</span>
+<span class="line">  <span class="hl-title function_ invoke__">g</span>(context).<span class="hl-keyword">await</span>;</span>
+<span class="line">  context.<span class="hl-title function_ invoke__">increment</span>();</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">async</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">g</span>(_context: &amp;Context) {</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>Do you see the problem? Surprisingly, even </span><code>rustc</code><span> doesn</span>&rsquo;<span>t see it, the code above compiles in</span>
+<span>isolation. However, when we start </span><em><span>using</span></em><span> it with Tokio</span>&rsquo;<span>s work-stealing runtime,</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">async</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">task_main</span>() {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">context</span> = Context::<span class="hl-title function_ invoke__">default</span>();</span>
+<span class="line">  <span class="hl-title function_ invoke__">f</span>(&amp;context).<span class="hl-keyword">await</span>;</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-meta">#[tokio::main]</span></span>
+<span class="line"><span class="hl-keyword">async</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">main</span>() {</span>
+<span class="line">  tokio::<span class="hl-title function_ invoke__">spawn</span>(<span class="hl-title function_ invoke__">task_main</span>());</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>we</span>&rsquo;<span>ll hit an error:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">error: future cannot be sent between threads safely</span>
+<span class="line"></span>
+<span class="line">--&gt; src/main.rs:29:18</span>
+<span class="line"> |</span>
+<span class="line"> | tokio::spawn(task_main());</span>
+<span class="line"> |              ^^^^^^^^^^^ future returned by `task_main` is not `Send`</span>
+<span class="line"> |</span>
+<span class="line"></span>
+<span class="line">within `Context`, the trait `Sync` is not implemented for `Cell&lt;i32&gt;`.</span>
+<span class="line"></span>
+<span class="line">if you want to do aliasing and mutation between multiple threads,</span>
+<span class="line">use `std::sync::RwLock` or `std::sync::atomic::AtomicI32` instead.</span></code></pre>
+
+</figure>
+<p><span>What happened here? When compiling </span><code>async fn f</code><span>, compiler reifies its stack frame as a Rust struct:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">struct</span> <span class="hl-title class_">FStackFrame</span>&lt;<span class="hl-symbol">&#x27;a</span>&gt; {</span>
+<span class="line">  context: &amp;<span class="hl-symbol">&#x27;a</span> Context,</span>
+<span class="line">  await_state: <span class="hl-type">usize</span></span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>This struct contains a reference to our </span><code>Context</code><span> type, and then </span><code>Context: !Sync</code><span> implies </span><code>&amp;Context:
+!Send</code><span> implies </span><code>FStackFrame&lt;'_&gt;: !Send </code><span>. And that finally clashes with the signature of</span>
+<code>tokio::spawn</code><span>:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">pub</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">spawn</span>&lt;F&gt;(future: F) <span class="hl-punctuation">-&gt;</span> JoinHandle&lt;F::Output&gt;</span>
+<span class="line"><span class="hl-keyword">where</span></span>
+<span class="line">    F: Future + <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>, <span class="hl-comment">// &lt;- note this Send</span></span>
+<span class="line">    F::Output: <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span></code></pre>
+
+</figure>
+<p><span>Tokio</span>&rsquo;<span>s default executor is work-stealing. It</span>&rsquo;<span>s going to poll the future from different threads, and that</span>&rsquo;<span>s</span>
+<span>why it is required that the future is </span><code>Send</code><span>.</span></p>
+<p><span>In my eyes this is a rather significant limitation, and a big difference with synchronous Rust.</span>
+<span>Async Rust has to be defensively thread-safe, while sync Rust is free to use non-thread-safe data</span>
+<span>structures when convenient.</span></p>
+</section>
+<section id="A-Better-Spawn">
+
+    <h2>
+    <a href="#A-Better-Spawn"><span>A Better Spawn</span> </a>
+    </h2>
+<p><span>One solution here is to avoid work-stealing executors:</span></p>
+<p><a href="https://maciej.codes/2022-06-09-local-async.html" class="display"><em><span>Local Async Executors and Why They Should be the Default</span></em></a></p>
+<p><span>That post correctly identifies the culprit:</span></p>
+
+<figure class="blockquote">
+<blockquote><p><span>I suggest to you, dear reader, that this function signature:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">pub</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">spawn</span>&lt;T&gt;(future: T) <span class="hl-punctuation">-&gt;</span> JoinHandle&lt;T::Output&gt; <span class="hl-keyword">where</span></span>
+<span class="line">    T: Future + <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span>
+<span class="line">    T::Output: <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span></code></pre>
+
+</figure>
+<p><span>is a gun.</span></p>
+</blockquote>
+
+</figure>
+<p><span>But as for the fix, I think Auri (</span><a href="https://blaz.is"><span>blaz.is</span></a><span>) got it right. The fix is </span><em><span>not</span></em><span> to</span>
+<span>remove </span><code>+ Send</code><span> bound, but rather to mirror </span><code>std::thread::spawn</code><span> more closely:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-comment">// std::thread::spawn</span></span>
+<span class="line"><span class="hl-keyword">pub</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">spawn</span>&lt;F, T&gt;(f: F) <span class="hl-punctuation">-&gt;</span> JoinHandle&lt;T&gt;</span>
+<span class="line"><span class="hl-keyword">where</span></span>
+<span class="line">    F: <span class="hl-title function_ invoke__">FnOnce</span>() <span class="hl-punctuation">-&gt;</span> T + <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span>
+<span class="line">    T: <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span>
+<span class="line"></span>
+<span class="line"><span class="hl-comment">// A hypothetical better async spawn</span></span>
+<span class="line"><span class="hl-keyword">pub</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">spawn</span>&lt;F, Fut&gt;(f: F) <span class="hl-punctuation">-&gt;</span> JoinHandle&lt;Fut::Output&gt;</span>
+<span class="line"><span class="hl-keyword">where</span></span>
+<span class="line">    F: <span class="hl-title function_ invoke__">FnOnce</span>() <span class="hl-punctuation">-&gt;</span> Fut + <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span>
+<span class="line">    Fut: Future,</span>
+<span class="line">    Fut::Output: <span class="hl-built_in">Send</span> + <span class="hl-symbol">&#x27;static</span>,</span></code></pre>
+
+</figure>
+<p><span>Let me explain first why this works, and then why this can</span>&rsquo;<span>t work.</span></p>
+<p><span>A </span><code>Future</code><span> is essentially a stack-frame of an asynchronous function. Original tokio version requires</span>
+<span>that all such stack frames are thread safe. This is not what happens in synchronous code </span>&mdash;<span> there,</span>
+<span>functions are free to put cells on their stacks. The </span><code>Send</code><span>ness is only guarded when data are</span>
+<span>actually send to a different thread, in </span><code>Chanel::send</code><span> and </span><code>thread::spawn</code><span>. The </span><code>spawn</code><span> function in</span>
+<span>particular says nothing about the </span><em><span>stack</span></em><span> of a new thread. It only requires that the data used to</span>
+<span>create the first stack frame is </span><code>Send</code><span>.</span></p>
+<p><span>And that</span>&rsquo;<span>s what we do in the async version: instead of spawning a future directly, it, just like the</span>
+<span>sync version, takes a closure. The closure is moved to a different execution context, so it must be</span>
+<code>: Send</code><span>. The actual future created by the closure in the new context can be whatever. An async</span>
+<span>runtime is free to poll this future from different threads regardless of its </span><code>Sync</code><span> status.</span></p>
+<p><span>Async work-stealing still works for the same reason that blocking work stealing works. Logical</span>
+<span>threads of execution can migrate between physical CPU cores because OS restores execution context</span>
+<span>when switching threads. Task can migrate between threads because async runtime restores execution</span>
+<span>context when switching tasks. Go is a proof that this is possible </span>&mdash;<span> goroutines migrate between</span>
+<span>different threads but they are free to use on-stack non-thread safe state. The pattern is clearly</span>
+<span>sound, the question is, can we express this fundamental soundness in Rust</span>&rsquo;<span>s type system, like we</span>
+<span>managed to do for OS threads?</span></p>
+<p><span>This is going to be tricky, because </span><code>Send</code><span> </span><em><span>today</span></em><span> absolutely means </span>&ldquo;<span>same thread</span>&rdquo;<span>, not </span>&ldquo;<span>same</span>
+<span>execution context</span>&rdquo;<span>. Here</span>&rsquo;<span>s one example that would break:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">async</span> <span class="hl-keyword">fn</span> <span class="hl-title function_">sneaky</span>() {</span>
+<span class="line">  thread_local! { <span class="hl-keyword">static</span> TL: Rc&lt;()&gt; = Rc::<span class="hl-title function_ invoke__">new</span>(()); }</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">rc</span> = TL.<span class="hl-title function_ invoke__">with</span>(|it| it.<span class="hl-title function_ invoke__">clone</span>());</span>
+<span class="line">  <span class="hl-keyword">async</span> {}.<span class="hl-keyword">await</span>;</span>
+<span class="line">  rc.<span class="hl-title function_ invoke__">clone</span>();</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>If the </span><code>.await</code><span> migrates to a different thread, we are in trouble: two tasks can start on the same</span>
+<span>thread, then diverge, but continue to hammer the same non-atomic reference count.</span></p>
+<p><span>Another breakage example is various OS APIs that just mandate that things happen on a particular</span>
+<span>execution thread, like </span><code>pthread_mutex_unlock</code><span>. Though I think that the turtle those APIs stand on</span>
+<span>are thread locals again?</span></p>
+<p><span>Can we fix it? As an absolute strawman proposal, let</span>&rsquo;<span>s redefine </span><code>Send</code><span> &amp; </span><code>Sync</code><span> in terms of abstract</span>
+&ldquo;<span>execution contexts</span>&rdquo;<span>, add </span><code>OsThreadSend</code><span> and </span><code>OsThreadSync</code><span>, and change API which involve thread</span>
+<span>locals to use the </span><code>OsThread</code><span> variants. It seems that everything else works?</span></p>
+</section>
+<section id="Four-Questions">
+
+    <h2>
+    <a href="#Four-Questions"><span>Four Questions</span> </a>
+    </h2>
+<p><span>I would like to posit four questions to the wider async Rust community.</span></p>
+<ol>
+<li>
+<p><span>Does this work in theory? As far as I can tell, this does indeed works, but I am not an async</span>
+<span>expert. Am I missing something?</span></p>
+<p><span>Ideally, I</span>&rsquo;<span>d love to see small, self-contained litmus test  examples that break </span><code>OsThreadSend</code>
+<span>Rust.</span></p>
+</li>
+<li>
+<p><span>Is this an important problem in practice to look into? On the one hand, people are quite</span>
+<span>successful with async Rust as it is. On the other hand, the expressivity gap here is real, and</span>
+<span>Rust, as a systems programming language, strives to minimize such gaps. And then there</span>&rsquo;<span>s the fact</span>
+<span>that failure mode today is rather nasty </span>&mdash;<span> although the actual type error is inside the </span><code>f</code>
+<span>function, we learn about it only at the call site in </span><code>main</code><span>.</span></p>
+<p><span>EDIT: I am also wondering </span>&mdash;<span> if we stop caring whether futures are </span><code>: Send</code><span>, does that mean we</span>
+<span>no longer need an explicit syntax for </span><code>Send</code><span> bounds in async traits?</span></p>
+</li>
+<li>
+<p><span>Assuming that this idea does work, and we decide that we care enough to try to fix it, is there a</span>
+<span>backwards-compatible path we could take to make this a reality?</span></p>
+<p><span>EDIT: to clarify, no way we are really adding a new auto-trait like </span><code>OsThreadSend</code><span>. But there</span>
+<span>could be some less invasive change to get the desired result. For example, a more promising</span>
+<span>approach is to expose some runtime hook for async runtimes to switch TLS, such that each task</span>
+<span>gets an independent copy of thread-local storage, as if task=thread.</span></p>
+</li>
+<li>
+<p><span>Is it a new idea that </span><code>!Send</code><span> futures and work-stealing don</span>&rsquo;<span>t conflict with each other? For me,</span>
+<span>that </span><a href="https://blaz.is/blog/post/lets-pretend-that-task-equals-thread/"><span>22.05.2023 post</span></a>
+<span>was the first time I</span>&rsquo;<span>ve learned that having a </span><code>&amp;Cell&lt;i32&gt;</code><span> in a future</span>&rsquo;<span>s state machine does not</span>
+<span>preclude polling it from different OS threads. But there</span>&rsquo;<span>s nothing particularly new there, the</span>
+<span>relevant APIs were stabilized years ago. Was this issue articulated and discussed back when the</span>
+<span>async Rust was designed, or is it a genuinely new finding?</span></p>
+</li>
+</ol>
+</section>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">IronBeetle</title>
+<link href="https://matklad.github.io/2023/11/16/IronBeetle.html" rel="alternate" type="text/html" title="IronBeetle" />
+<published>2023-11-16T00:00:00+00:00</published>
+<updated>2023-11-16T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/11/16/IronBeetle</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[Hey, I am trying my hand at this Twitch thing and stream stuff about TigerBeetle at 17:00 UTC on
+Thursdays. The format is unscripted, unedited stream&amp;talk, so this is not particularly information
+dense, but it is fun (at least for me):]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/11/16/IronBeetle.html"><![CDATA[
+    <h1>
+    <a href="#IronBeetle"><span>IronBeetle</span> <time datetime="2023-11-16">Nov 16, 2023</time></a>
+    </h1>
+<p><span>Hey, I am trying my hand at this Twitch thing and stream </span>&ldquo;<span>stuff about TigerBeetle</span>&rdquo;<span> at 17:00 UTC on</span>
+<span>Thursdays. The format is unscripted, unedited </span>&ldquo;<span>stream&amp;talk</span>&rdquo;<span>, so this is not particularly information</span>
+<span>dense, but it is fun (at least for me):</span></p>
+<p><a href="https://www.twitch.tv/tigerbeetle" class="url">https://www.twitch.tv/tigerbeetle</a></p>
+<p><span>The videos are mirrored on YouTube at</span></p>
+<p><a href="https://www.youtube.com/playlist?list=PL9eL-xg48OM3pnVqFSRyBFleHtBBw-nmZ" class="url">https://www.youtube.com/playlist?list=PL9eL-xg48OM3pnVqFSRyBFleHtBBw-nmZ</a></p>
+<p><a href="https://www.twitch.tv/tigerbeetle/schedule?seriesID=d68b46cb-26a6-4d68-8fd0-cccb52c91a80"><img alt="IronBeetle logo" src="https://user-images.githubusercontent.com/1711539/283560790-3397bca9-597c-4eda-be53-0ce3636ac206.png"></a></p>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">Push Ifs Up And Fors Down</title>
+<link href="https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down.html" rel="alternate" type="text/html" title="Push Ifs Up And Fors Down" />
+<published>2023-11-15T00:00:00+00:00</published>
+<updated>2023-11-15T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[A short note on two related rules of thumb.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down.html"><![CDATA[
+    <h1>
+    <a href="#Push-Ifs-Up-And-Fors-Down"><span>Push Ifs Up And Fors Down</span> <time datetime="2023-11-15">Nov 15, 2023</time></a>
+    </h1>
+<p><span>A short note on two related rules of thumb.</span></p>
+<section id="Push-Ifs-Up">
+
+    <h2>
+    <a href="#Push-Ifs-Up"><span>Push Ifs Up</span> </a>
+    </h2>
+<p><span>If there</span>&rsquo;<span>s an </span><code>if</code><span> condition inside a function, consider if it could be moved to the caller instead:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-comment">// GOOD</span></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">frobnicate</span>(walrus: Walrus) {</span>
+<span class="line">    ...</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-comment">// BAD</span></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">frobnicate</span>(walrus: <span class="hl-type">Option</span>&lt;Walrus&gt;) {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">walrus</span> = <span class="hl-keyword">match</span> walrus {</span>
+<span class="line">    <span class="hl-title function_ invoke__">Some</span>(it) =&gt; it,</span>
+<span class="line">    <span class="hl-literal">None</span> =&gt; <span class="hl-keyword">return</span>,</span>
+<span class="line">  };</span>
+<span class="line">  ...</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>As in the example above, this often comes up with preconditions: a function might check precondition</span>
+<span>inside and </span>&ldquo;<span>do nothing</span>&rdquo;<span> if it doesn</span>&rsquo;<span>t hold, or it could push the task of precondition checking to</span>
+<span>its caller, and enforce via types (or an assert) that the precondition holds. With preconditions</span>
+<span>especially, </span>&ldquo;<span>pushing up</span>&rdquo;<span> can become viral, and result in fewer checks overall, which is one</span>
+<span>motivation for this rule of thumb.</span></p>
+<p><span>Another motivation is that control flow and </span><code>if</code><span>s are complicated, and are  a source of bugs. By</span>
+<span>pushing </span><code>if</code><span>s up, you often end up centralizing control flow in a single function, which has a</span>
+<span>complex branching logic, but all the actual work is delegated to straight line subroutines.</span></p>
+<p><em><span>If</span></em><span> you have complex control flow, better to fit it on a screen in a single function, rather than</span>
+<span>spread throughout the file. What</span>&rsquo;<span>s more, with all the flow in one place it often is possible to</span>
+<span>notice redundancies and dead conditions. Compare:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">f</span>() {</span>
+<span class="line">  <span class="hl-keyword">if</span> foo &amp;&amp; bar {</span>
+<span class="line">    <span class="hl-keyword">if</span> foo {</span>
+<span class="line"></span>
+<span class="line">    } <span class="hl-keyword">else</span> {</span>
+<span class="line"></span>
+<span class="line">    }</span>
+<span class="line">  }</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">g</span>() {</span>
+<span class="line">  <span class="hl-keyword">if</span> foo &amp;&amp; bar {</span>
+<span class="line">    <span class="hl-title function_ invoke__">h</span>()</span>
+<span class="line">  }</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">h</span>() {</span>
+<span class="line">  <span class="hl-keyword">if</span> foo {</span>
+<span class="line"></span>
+<span class="line">  } <span class="hl-keyword">else</span> {</span>
+<span class="line"></span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>For </span><code>f</code><span>, it</span>&rsquo;<span>s much easier to notice a dead branch than for a combination of </span><code>g</code><span> and </span><code>h</code><span>!</span></p>
+<p><span>A related pattern here is what I call </span>&ldquo;<span>dissolving enum</span>&rdquo;<span> refactor. Sometimes, the code ends up</span>
+<span>looking like this:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">enum</span> <span class="hl-title class_">E</span> {</span>
+<span class="line">  <span class="hl-title function_ invoke__">Foo</span>(<span class="hl-type">i32</span>),</span>
+<span class="line">  <span class="hl-title function_ invoke__">Bar</span>(<span class="hl-type">String</span>),</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">main</span>() {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">e</span> = <span class="hl-title function_ invoke__">f</span>();</span>
+<span class="line">  <span class="hl-title function_ invoke__">g</span>(e)</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">f</span>() <span class="hl-punctuation">-&gt;</span> E {</span>
+<span class="line">  <span class="hl-keyword">if</span> condition {</span>
+<span class="line">    E::<span class="hl-title function_ invoke__">Foo</span>(x)</span>
+<span class="line">  } <span class="hl-keyword">else</span> {</span>
+<span class="line">    E::<span class="hl-title function_ invoke__">Bar</span>(y)</span>
+<span class="line">  }</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">g</span>(e: E) {</span>
+<span class="line">  <span class="hl-keyword">match</span> e {</span>
+<span class="line">    E::<span class="hl-title function_ invoke__">Foo</span>(x) =&gt; <span class="hl-title function_ invoke__">foo</span>(x),</span>
+<span class="line">    E::<span class="hl-title function_ invoke__">Bar</span>(y) =&gt; <span class="hl-title function_ invoke__">bar</span>(y)</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>There are two branching instructions here and, by pulling them up, it becomes apparent that it is</span>
+<span>the exact same condition, triplicated (the third time reified as a data structure):</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">main</span>() {</span>
+<span class="line">  <span class="hl-keyword">if</span> condition {</span>
+<span class="line">    <span class="hl-title function_ invoke__">foo</span>(x)</span>
+<span class="line">  } <span class="hl-keyword">else</span> {</span>
+<span class="line">    <span class="hl-title function_ invoke__">bar</span>(y)</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+</section>
+<section id="Push-Fors-Down">
+
+    <h2>
+    <a href="#Push-Fors-Down"><span>Push Fors Down</span> </a>
+    </h2>
+<p><span>This comes from data oriented school of thought. Few things are few, many things are many. Programs</span>
+<span>usually operate with bunches of objects. Or at least the hot path usually involves handling many</span>
+<span>entities. It is the volume of entities that makes the path hot in the first place. So it often is</span>
+<span>prudent to introduce a concept of a </span>&ldquo;<span>batch</span>&rdquo;<span> of objects, and make operations on batches the base</span>
+<span>case, with a scalar version being a special case of a batched ones:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-comment">// GOOD</span></span>
+<span class="line"><span class="hl-title function_ invoke__">frobnicate_batch</span>(walruses)</span>
+<span class="line"></span>
+<span class="line"><span class="hl-comment">// BAD</span></span>
+<span class="line"><span class="hl-keyword">for</span> <span class="hl-variable">walrus</span> <span class="hl-keyword">in</span> walruses {</span>
+<span class="line">  <span class="hl-title function_ invoke__">frobnicate</span>(walrus)</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>The primary benefit here is performance. Plenty of performance, </span><a href="http://venge.net/graydon/talks/VectorizedInterpretersTalk-2023-05-12.pdf"><span>in extreme</span>
+<span>cases</span></a><span>.</span></p>
+<p><span>If you have a whole batch of things to work with, you can amortize startup cost and be flexible</span>
+<span>about the order you process things. In fact, you don</span>&rsquo;<span>t even need to process entities in any</span>
+<span>particular order, you can do vectorized/struct-of-array tricks to process one field of all entities</span>
+<span>first, before continuing with other fields.</span></p>
+<p><span>Perhaps the most fun example here is </span><a href="https://en.wikipedia.org/wiki/Sch%C3%B6nhage%E2%80%93Strassen_algorithm"><span>FFT-based polynomial</span>
+<span>multiplication</span></a><span>: turns out,</span>
+<span>evaluating a polynomial at a bunch of points simultaneously could be done faster than a bunch of</span>
+<span>individual point evaluations!</span></p>
+<p><span>The two pieces of advice about </span><code>for</code><span>s and </span><code>if</code><span>s even compose!</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-comment">// GOOD</span></span>
+<span class="line"><span class="hl-keyword">if</span> condition {</span>
+<span class="line">  <span class="hl-keyword">for</span> <span class="hl-variable">walrus</span> <span class="hl-keyword">in</span> walruses {</span>
+<span class="line">    walrus.<span class="hl-title function_ invoke__">frobnicate</span>()</span>
+<span class="line">  }</span>
+<span class="line">} <span class="hl-keyword">else</span> {</span>
+<span class="line">  <span class="hl-keyword">for</span> <span class="hl-variable">walrus</span> <span class="hl-keyword">in</span> walruses {</span>
+<span class="line">    walrus.<span class="hl-title function_ invoke__">transmogrify</span>()</span>
+<span class="line">  }</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-comment">// BAD</span></span>
+<span class="line"><span class="hl-keyword">for</span> <span class="hl-variable">walrus</span> <span class="hl-keyword">in</span> walruses {</span>
+<span class="line">  <span class="hl-keyword">if</span> condition {</span>
+<span class="line">    walrus.<span class="hl-title function_ invoke__">frobnicate</span>()</span>
+<span class="line">  } <span class="hl-keyword">else</span> {</span>
+<span class="line">    walrus.<span class="hl-title function_ invoke__">transmogrify</span>()</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>The </span><code>GOOD</code><span> version is good, because it avoids repeatedly re-evaluating </span><code>condition</code><span>, removes a branch</span>
+<span>from the hot loop, and potentially unlocks vectorization. This pattern works on a micro level and on</span>
+<span>a macro level </span>&mdash;<span> the good version is the architecture of TigerBeetle, where in the data plane we</span>
+<span>operate on batches of objects at the same time, to amortize the cost of decision making in the</span>
+<span>control plane.</span></p>
+<p><span>While performance is perhaps the primary motivation for the </span><code>for</code><span> advice, sometimes it helps with</span>
+<span>expressiveness as well. </span><code>jQuery</code><span> was quite successful back in the day, and it operates on</span>
+<span>collections of elements. The language of abstract vector spaces is often a better tool for thought</span>
+<span>than bunches of coordinate-wise equations.</span></p>
+<p><span>To sum up, push the </span><code>if</code><span>s up and the </span><code>for</code><span>s down!</span></p>
+</section>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">Data Oriented Blogging</title>
+<link href="https://matklad.github.io/2023/11/07/dta-oriented-blogging.html" rel="alternate" type="text/html" title="Data Oriented Blogging" />
+<published>2023-11-07T00:00:00+00:00</published>
+<updated>2023-11-07T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/11/07/dta-oriented-blogging</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[Wherein I describe the setup of this blog. The main take away from the post are not specific
+technical tools, but the underlying principles and ideas, which I wish I had articulated earlier.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/11/07/dta-oriented-blogging.html"><![CDATA[
+    <h1>
+    <a href="#Data-Oriented-Blogging"><span>Data Oriented Blogging</span> <time datetime="2023-11-07">Nov 7, 2023</time></a>
+    </h1>
+<p><span>Wherein I describe the setup of this blog. The main take away from the post are not specific</span>
+<span>technical tools, but the underlying principles and ideas, which I wish I had articulated earlier.</span></p>
+
+<figure class="blockquote">
+<blockquote><p><span>If you don’t understand the data you don’t understand the problem.</span></p>
+</blockquote>
+<figcaption><cite><a href="https://youtu.be/rX0ItVEVjHc?si=2IzGZSFKsi1xkls8&amp;t=780"><span>Sun Tzu</span></a></cite></figcaption>
+</figure>
+<p><span>Physically, a typical blog is a directory of </span><code>.html</code><span> and </span><code>.css</code><span> files which are available over HTTP.</span>
+<span>The simplest way to create those files is to just write them by hand. While in some cases that might</span>
+<span>be enough, often it isn</span>&rsquo;<span>t.</span></p>
+<p><span>If a blog has multiple pages, you usually want to have some common elements </span>&mdash;<span> header, footer,</span>
+<span>style, etc. It </span><em><span>is</span></em><span> possible to get common style by copy-pasting an existing page every time you</span>
+<span>need to add something. This makes changes hard </span>&mdash;<span> having consistent layout at a single point in time</span>
+<span>is not sufficient, one almost always wants to be able to apply consistent modifications as well.</span></p>
+<p><span>The second issue with hand-written html is that some parts might be very annoying to hand-write. For</span>
+<span>example, code snippets with syntax highlighting require quite a few tags.</span></p>
+<p><span>Finally, writing html by hand is not necessarily most convenient. A </span><code>*</code><span> bullet-list certainly is more</span>
+<span>pleasant to look at than an </span><code>&lt;ul&gt;&lt;li&gt;&lt;/li&gt;&lt;/ul&gt;</code><span>!</span></p>
+<p><span>That</span>&rsquo;<span>s why a blog usually is some sort of a script (a program) which reads input content in some</span>
+<span>light markup language (Markdown typically) and writes HTML. As most blogs are similar, it is</span>
+<span>possible to generalize and abstract such a script, and the result would be called a </span>&ldquo;<span>static site</span>
+<span>generator</span>&rdquo;<span>. I don</span>&rsquo;<span>t like this term very much, as it sounds more complicated than the underlying</span>
+<span>problem at hand </span>&mdash;<span> reading </span><code>.md</code><span> files and writing out </span><code>.html</code><span>s.</span></p>
+<p><span>Static Site Generators are an example of the </span><dfn><span>template method</span></dfn><span> pattern, where the framework</span>
+<span>provides the overall control flow, but also includes copious extension points for customizing</span>
+<span>behaviors. Template method allows for some code re-use at the cost of obscure and indirect control</span>
+<span>flow. This pattern pays off when you have many different invocations of template method with few, if</span>
+<span>any, non-trivial customizations. Conversely, a template method with a single, highly customized</span>
+<span>call-site probably should be refactored away in favor of direct control flow.</span></p>
+<p><span>If you maintain dozens mostly identical websites, you definitely need a static site generator. If</span>
+<span>you have only one site to maintain, you might consider writing the overall scaffolding yourself.</span></p>
+<p><span>If you pick an SSG, pay close attention to its extensibility mechanism, you want to avoid situations</span>
+<span>where you know how to do something </span>&ldquo;<span>by hand</span>&rdquo;<span>, but the SSG is not flexible enough to express that.</span>
+<span>Flexible SSG typically have some way to inject user code in their processing, for free-form</span>
+<span>customization. For this reason, I am somewhat skeptical of static site generators implemented in</span>
+<span>languages without eval, such as Go and Rust. They might be excellent as long as they fulfill your</span>
+<span>needs exactly. However, should you need something more custom than what</span>&rsquo;<span>s available out of the box,</span>
+<span>you might find yourself unable to implement that. This creates discontinuity in complexity.</span></p>
+<p><span>Note that I am </span><em><span>not</span></em><span> saying that every site out there needs some custom plugins. Most (certainly,</span>
+<span>most well-maintained ones) work just fine with fairly vanilla configurations. Rather, it</span>&rsquo;<span>s a</span>
+<span>statement about risks </span>&mdash;<span> there</span>&rsquo;<span>s small, but non-zero probability that you</span>&rsquo;<span>ll need something quite</span>
+<span>unusual. However, should you find yourself with a use-case which is not supported by your SSG</span>&rsquo;<span>s</span>
+<span>available customization options, the cost of the work-around could be very high.</span></p>
+<p><span>I only have to maintain this single blog, and I want the freedom to experiment with fairly custom</span>
+<span>things, so, in this context, writing the scaffolding script myself makes more sense.</span></p>
+<section id="The-Best-Tool-For-The-Job">
+
+    <h2>
+    <a href="#The-Best-Tool-For-The-Job"><span>The Best Tool For The Job</span> </a>
+    </h2>
+<p><span>Converting from one text format to another isn</span>&rsquo;<span>t particularly resource intensive and is trivial to</span>
+<span>parallelize. But it requires a fair amount of work with strings, dates, file-system and such, which</span>
+<span>points towards a higher-level programming language. However, the overriding concern is stability </span>&mdash;
+<span>blogs usually don</span>&rsquo;<span>t enjoy active daily maintenance, and nothing can distract more than the need to</span>
+<span>sort out the tooling even before you get to writing.</span></p>
+<p><span>I wish I could recommend a stable high-level scripting language, but, to my knowledge, there isn</span>&rsquo;<span>t</span>
+<span>any yet. Python falls apart as soon as you need to install a dependency. While I highly recommend</span>
+<a href="https://www.b-list.org/weblog/2022/may/13/boring-python-dependencies/"><em><span>Boring Dependency Management</span></em></a><span>,</span>
+<span>knowing that </span><code>pip-compile</code><span> is that one extra tool you need is one extra tool too many. While Node</span>
+<span>works for adding dependencies, it makes it hard to keep up with them (in Node.JS, dependencies</span>
+<span>manage you). I don</span>&rsquo;<span>t know a lot about Ruby, but, in the Jekyll days of this blog, I</span>&rsquo;<span>ve never learned</span>
+<span>how to configure </span><code>bundler</code><span> (or is it </span><code>gem</code><span>?) to use project-local dependencies by default.</span></p>
+<p><span>For this reason, I</span>&rsquo;<span>d say picking Go or Rust for the task makes sense. Yes, those are quite a bit</span>
+<span>more verbose than what you</span>&rsquo;<span>d ideally need for bossing Markdown around, but their quality of</span>
+<span>implementation is great, and QoI is what matters here most.</span></p>
+<p><span>I use </span><a href="https://deno.land"><span>Deno</span></a><span> for this blog. Deno is poised to become that scripting environment I</span>
+<span>wish existed: </span><a href="https://matklad.github.io/2023/02/12/a-love-letter-to-deno.html" class="display url">https://matklad.github.io/2023/02/12/a-love-letter-to-deno.html</a></p>
+<p><span>In addition to the overall QoI, it has particular affinity for web stuff. Out of the box, it has</span>
+<span>extra niceties, like file system watching and hot-reloading, or the permissions system to catch</span>
+<span>mistakes when reading or writing wrong files. The only reason to recommend Rust and Go over Deno at</span>
+<span>this point is that Deno is still pretty young, and, subjectively, needs more time to graduate into</span>
+<span>boring tech.</span></p>
+<p><span>Having picked the language, which text format should be the input?</span></p>
+</section>
+<section id="Data-In">
+
+    <h2>
+    <a href="#Data-In"><span>Data In</span> </a>
+    </h2>
+<p><span>The most typical choice here is Markdown. Markdown is </span>&hellip;<span> fine overall, but it does have one pretty</span>
+<span>glaring deficiency </span>&mdash;<span> vanilla Markdown doesn</span>&rsquo;<span>t allow for custom elements. An example of a custom</span>
+<span>element would be a shortcut, like </span><kbd><kbd><span>ctrl </kbd>+<kbd> c</span></kbd></kbd><span>. In stock Markdown, there</span>&rsquo;<span>s no syntactic</span>
+<span>mechanism to designate something as </span>&ldquo;<span>this is my custom element</span>&rdquo;<span>. You can add syntactic extensions,</span>
+<span>but then you</span>&rsquo;<span>ll need new syntax for each custom element. Alternatively, you can use a Markdown</span>
+<span>dialect which supports generic extensibility, like </span><a href="https://pandoc.org/MANUAL.html#extension-fenced_divs"><span>Pandoc</span>
+<span>Markdown</span></a><span> or </span><a href="https://mdxjs.com"><span>MDX</span></a><span>.</span></p>
+<p><span>An interesting choice for source data format would be HTML with custom tags. If you write some HTML</span>
+<span>by hand, that doesn</span>&rsquo;<span>t mean you have to write all HTML manually </span>&mdash;<span> a script can desugar hand-written</span>
+<span>HTML into more verbose form for the browser. For example, the source for a post can contain a</span>
+<span>snippet like this:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-tag">&lt;<span class="hl-name">listing</span> <span class="hl-attr">lang</span>=<span class="hl-string">&quot;rust&quot;</span>&gt;</span></span>
+<span class="line">fn main() {</span>
+<span class="line">    println!(&quot;Hello, World!&quot;)</span>
+<span class="line">}</span>
+<span class="line"><span class="hl-tag">&lt;/<span class="hl-name">listing</span>&gt;</span></span></code></pre>
+
+</figure>
+<p><span>The script then reads and parses this HTML, and produces appropriate </span><code>pre &gt; code</code><span> with syntax</span>
+<span>highlighting soup.</span></p>
+<p><span>HTML would  be my recommendation if I were optimizing for stability. These days, many editors have</span>
+<a href="https://emmet.io"><span>emmet</span></a><span> out of the box, which makes producing HTML not that horrible:</span></p>
+
+<figure>
+
+<video src="https://user-images.githubusercontent.com/1711539/281008432-9c84db2c-66ca-4c77-9551-b1584d40284d.webm" autoplay muted=true loop=true></video>
+</figure>
+<p><span>But wouldn</span>&rsquo;<span>t it be great if there was an extensible light markup language, which combines concise</span>
+<span>syntax and tasty sugar of Markdown with extensibility and flexibility of HTML,</span>
+<a href="https://matklad.github.io/2022/10/28/elements-of-a-great-markup-language.html"><em><span>The Elements of a Great Markup Language</span></em></a><span>?</span>
+<span>It actually sort-of-exists already:</span>
+<a href="https://djot.net" class="display url">https://djot.net</a></p>
+<p><span>Djot is quite a bit like Deno in that it takes well established good ideas, and just doesn</span>&rsquo;<span>t mess up</span>
+<span>the implementation. But it is also an emerging technology at this point, not even at 1.0, so use at</span>
+<span>your own risk.</span></p>
+</section>
+<section id="Data-Out">
+
+    <h2>
+    <a href="#Data-Out"><span>Data Out</span> </a>
+    </h2>
+<p><span>The output clearly has to be HTML, but there are many ways to manufacture this markup. Producing</span>
+<span>HTML is not an entirely solved problem. Usually, some sort of textual templating is used, but that</span>&rsquo;<span>s</span>
+<span>a fundamentally wrong approach: </span><a href="https://www.devever.net/~hl/stringtemplates" class="display url">https://www.devever.net/~hl/stringtemplates</a></p>
+<p><span>For this problem, the shape of data is not that of a string, rather it is a tree.</span></p>
+<p><span>Luckily for the blogging domain, the main motivation for proper solution is protection from XSS.</span>
+<span>Blogs usually don</span>&rsquo;<span>t include user-submitted content, so one can play fast and loose with escaping.</span>
+<span>That is to say, if your language supports </span><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals"><span>string</span>
+<span>interpolation</span></a><span>,</span>
+<span>that might be enough of a templating engine. That is what this blog does </span>&mdash;<span> just backticks in</span>
+<span>TypeScript.</span></p>
+<p><span>What</span>&rsquo;<span>s tantalizing is that the proper solutions is clearly visible, and is </span><em><span>just</span></em><span> out of reach. We</span>
+<span>have JSX now, the proper </span>&ldquo;<span>write code to produce trees</span>&rdquo;<span> solution. Sadly, I don</span>&rsquo;<span>t think it</span>&rsquo;<span>s</span>
+<span>immediately usable as of yet. </span><a href="https://docs.deno.com/runtime/manual/advanced/jsx_dom/jsx#jsx-import-source"><span>Deno</span>
+<span>docs</span></a><span> mention some</span>
+&ldquo;<span>new</span>&rdquo;<span> JSX API, with an initial support. I also don</span>&rsquo;<span>t see some built-in (or obviously blessed) way to</span>
+<span>take my JSX syntax and convert it to string when writing to an </span><code>.html</code><span> file.</span></p>
+</section>
+<section id="Look-and-Feel">
+
+    <h2>
+    <a href="#Look-and-Feel"><span>Look and Feel</span> </a>
+    </h2>
+<p><span>It</span>&rsquo;<span>s not enough to produce HTML, it also has to look good. I don</span>&rsquo;<span>t find this acceptable:</span></p>
+<p><a href="https://danluu.com/input-lag/" class="display url">https://danluu.com/input-lag/</a></p>
+<p><span>It is completely unreadable on a 16:9 screen. Which might have good second-order effects (people</span>
+<span>clearly come for content rather than for style), but, really, just no :-)</span></p>
+<p><span>It would be fair to say that that</span>&rsquo;<span>s browser</span>&rsquo;<span>s (aka backwards compatibility) fault </span>&mdash;<span> ideally,</span>
+<span>unstyled HTML would look good, with some reasonable max-width and default body font-size a touch</span>
+<span>larger than 16px. I</span>&rsquo;<span>d love if there were some sort of </span><code>&lt;style modern/&gt;</code><span> tag to opt-into a new set of</span>
+<span>default css rules, which would be consistent across browsers (obviating the need for CSS reset), and</span>
+<span>would make classless HTML readable. Alas, we don</span>&rsquo;<span>t have that, and need to provide browsers with some</span>
+<span>minimum amount of CSS ourselves.</span></p>
+<p><span>The good news is, that</span>&rsquo;<span>s not so hard this days. When I was starting with programming, web dev was</span>
+<span>pretty arcane, and consisted </span><em><span>mostly</span></em><span> of clever hacks, like tables &amp; floats. At that time, I didn</span>&rsquo;<span>t</span>
+<span>feel qualified to do CSS.</span></p>
+<p><span>Today, the specifications evolved to become much simpler to use (if sprawling at the edges), and</span>
+<span>browsers are significantly more uniform, so even I can cook up something presentable. Some survival</span>
+<span>tips here:</span></p>
+<ul>
+<li>
+<span>At small scale, built-in web technologies work. HTML&amp;CSS are plenty; you could use, but you don</span>&rsquo;<span>t</span>
+<span>necessary need React, css processors, transpilers, and the rest.</span>
+</li>
+<li>
+<a href="https://developer.mozilla.org/en-US/docs/Web/HTML"><span>MDN docs</span></a><span> are awesome.</span>
+</li>
+<li>
+<a href="https://developer.mozilla.org/en-US/docs/Web/CSS/box-sizing#border-box"><code>box-sizing: border-box</code></a>
+<span>and understanding </span><a href="https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_box_model/Mastering_margin_collapsing"><span>margin</span>
+<span>collapsing</span></a>
+<span>are two required things to make sense of layout in the small.</span>
+</li>
+<li>
+<a href="https://developer.mozilla.org/en-US/docs/Learn/CSS/CSS_layout/Flexbox"><span>Flexbox</span></a><span> is the modern,</span>
+<span>intuitive way for layout in the large.</span>
+</li>
+<li>
+<span>CSS reset/normalization is sadly still a thing. Browsers come with default CSS rules for various</span>
+<span>elements, and sometimes these rules differ between them, which requires an explicit override in</span>
+<span>the css you write. Unfortunately, I don</span>&rsquo;<span>t know much beyond that, but</span>
+<a href="https://github.com/sindresorhus/modern-normalize" class="url">https://github.com/sindresorhus/modern-normalize</a><span> looks like a reasonable place to start.</span>
+</li>
+</ul>
+<hr>
+<p><span>To conclude, let</span>&rsquo;<span>s circle back to that claim that a typical blog is a directory with a bunch of</span>
+<span>.html and .css files. This is not true. There</span>&rsquo;<span>s no physical relation between HTTP requests and</span>
+<span>responses, and the contents of the file system. Rather, it</span>&rsquo;<span>s just a thin waist, a convention</span>
+<span>collectively employed by many different HTTP servers to allow easy customization of HTTP responses,</span>
+<span>yet another template method pattern. This is a remarkably successful thin waist though, it merges</span>
+<span>completely with the background and is invisible unless you really go looking for it.</span></p>
+</section>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">Unified Versus Split Diff</title>
+<link href="https://matklad.github.io/2023/10/23/unified-vs-split-diff.html" rel="alternate" type="text/html" title="Unified Versus Split Diff" />
+<published>2023-10-23T00:00:00+00:00</published>
+<updated>2023-10-23T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/10/23/unified-vs-split-diff</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[Which is better for code reviews, a unified diff or a split diff?]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/10/23/unified-vs-split-diff.html"><![CDATA[
+    <h1>
+    <a href="#Unified-Versus-Split-Diff"><span>Unified Versus Split Diff</span> <time datetime="2023-10-23">Oct 23, 2023</time></a>
+    </h1>
+<p><span>Which is better for code reviews, a unified diff or a split diff?</span></p>
+<p><span>A split diff looks like this for me:</span></p>
+
+<figure>
+
+<img alt="" src="https://user-images.githubusercontent.com/1711539/277481233-026508cf-47ed-4897-934a-fee18b708553.png">
+</figure>
+<p><span>And this is a unified one:</span></p>
+
+<figure>
+
+<img alt="" src="https://user-images.githubusercontent.com/1711539/277481510-12ee62af-0305-412b-9f37-57a37744751b.png">
+</figure>
+<p><span>If the changes are simple and small, both views are good. But for larger, more complex changes</span>
+<span>neither works for me.</span></p>
+<p><span>For a large change, I don</span>&rsquo;<span>t want to do a </span>&ldquo;<span>diff review</span>&rdquo;<span>, I want to do a proper code review of a</span>
+<span>codebase at a particular instant in time, paying specific attention to the recently changed areas,</span>
+<span>but mostly just doing general review, as if I am writing the code. I need to run tests, use goto</span>
+<span>definition and other editor navigation features, apply local changes to check if some things could</span>
+<span>have been written differently, look at the wider context to notice things that </span><em><span>should</span></em><span> have been</span>
+<span>changed, and in general notice anything that might be not quite right with the codebase,</span>
+<span>irrespective of the historical path to the current state of the code.</span></p>
+<p><span>So, for me, the ideal diff view would look rather like this:</span></p>
+
+<figure>
+
+<img alt="" src="https://user-images.githubusercontent.com/1711539/277485436-5e9ff9d5-325b-4e2c-8285-4acb6a8c088b.png">
+</figure>
+<p><span>On the left, the current state of the code (which is also the on-disk state), with changes subtly</span>
+<span>highlighted in the margins. On the right, the unified diff for the portion of the codebase currently</span>
+<span>visible on the left.</span></p>
+<p><span>Sadly, this format of review isn</span>&rsquo;<span>t well supported by the tools </span>&mdash;<span> everyone seems to be happy</span>
+<span>reviewing diffs, rather than the actual code?</span></p>
+<p><span>I have a low-tech and pretty inefficient workflow for this style of review. A </span><a href="https://github.com/matklad/config/blob/master/xtool/src/gpr.rs"><code>gpr</code>
+<span>script</span></a><span> for checking out a pull</span>
+<span>request locally:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-title function_">$</span> gpr 1234 --review</span></code></pre>
+
+</figure>
+<p><span>Internally, it does roughly</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-title function_">$</span> git fetch upstream refs/pull/1234/head</span>
+<span class="line"><span class="hl-title function_">$</span> git switch --detach FETCH_HEAD</span>
+<span class="line"><span class="hl-title function_">$</span> git reset $(git merge-base HEAD main)</span></code></pre>
+
+</figure>
+<p><span>The last line is the key </span>&mdash;<span> it erases all the commits from the pull request, but keeps all of the</span>
+<span>changes. This lets me abuse my workflow for staging&amp;committing to do a code review </span>&mdash;
+<a href="https://github.com/kahole/edamagit"><span>edamagit</span></a><span> shows the list of changed files, I get </span>&ldquo;<span>go to</span>
+<span>next/previous change</span>&rdquo;<span> shortcuts in the editor, I can even use the staging area to mark hunks I have</span>
+<span>reviewed.</span></p>
+<p><span>The only thing I </span><em><span>don</span>&rsquo;<span>t</span></em><span> get is automatic synchronization between magit status buffer, and the file</span>
+<span>that</span>&rsquo;<span>s currently open in the editor. That is, to view the current file and the diff on the side, I</span>
+<span>have to manually open the diff and scroll it to the point I am currently looking at.</span></p>
+<p><span>I wish it was easier to get this close to the code without building custom ad-hoc tools!</span></p>
+<p><span>P.S. This post talks about how to review code, but reviewing the code is not necessary the primary</span>
+<span>goal of code review. See this related post:</span>
+<a href="https://matklad.github.io/2021/01/03/two-kinds-of-code-review.html"><em><span>Two Kinds of Code Review</span></em></a><span>.</span></p>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">Unless Explicitly Specified Otherwise, Open Source Software With Users Carries Moral Obligations</title>
+<link href="https://matklad.github.io/2023/10/18/obligations.html" rel="alternate" type="text/html" title="Unless Explicitly Specified Otherwise, Open Source Software With Users Carries Moral Obligations" />
+<published>2023-10-18T00:00:00+00:00</published>
+<updated>2023-10-18T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/10/18/obligations</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[My thoughts on the topic of whether maintainers owe you anything. Speaking as an author, a maintainer,
+a user of, and a contributor to open-source software.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/10/18/obligations.html"><![CDATA[
+    <h1>
+    <a href="#Unless-Explicitly-Specified-Otherwise-Open-Source-Software-With-Users-Carries-Moral-Obligations"><span>Unless Explicitly Specified Otherwise, Open Source Software With Users Carries Moral Obligations</span> <time datetime="2023-10-18">Oct 18, 2023</time></a>
+    </h1>
+<p><span>My thoughts on the topic of whether maintainers owe you anything. Speaking as an author, a maintainer,</span>
+<span>a user of, and a contributor to open-source software.</span></p>
+<p><span>Let</span>&rsquo;<span>s start with a thing which I find obvious and non-negotiable: I can</span>&rsquo;<span>t lie in my README.md.</span></p>
+<p><span>I can</span>&rsquo;<span>t write </span>&ldquo;<span>this software is reliable, fast, and secure</span>&rdquo;<span> if in fact my software is slow,</span>
+<span>crashes, and comes with a backdoor pre-installed. More generally, if I promise something in the</span>
+<span>readme, I</span>&rsquo;<span>d better follow up on the promise and be ready to apologize if I fail.</span></p>
+<p><span>If I create expectations between me and my users, I am on the hook for conforming to them.</span></p>
+<p><span>The subtle point here is, if I make an Open Source Project, push it to some forge, write a nice</span>
+<span>readme explaining why one would want to use it, provide one-liner for installation, and publish</span>
+<span>builds to some package registries, I am already creating some expectations. The act of inviting</span>
+<span>users (and writing usage instructions aimed at a general audience </span><em><span>is</span></em><span> an act of inviting users)</span>
+<span>forms an agreement between me as a maintainer and the user.</span></p>
+<p><span>Expectations, but how great? Let</span>&rsquo;<span>s say that tomorrow at this place I am run over by an automobile.</span>
+<span>That would be a tragedy for many reasons! But should I worry, on top of all that, that I can no</span>
+<span>longer swiftly react to vulnerabilities reported against my open-source software? Obviously not! And</span>
+<span>that</span>&rsquo;<span>s the bound on expectations here: it is absolutely ok for a maintainer to do absolutely</span>
+<span>nothing.</span></p>
+<p><span>At the same time, if I publish a project, write a nice readme, provide installation instructions,</span>
+<span>etc, and then add a backdoor to my software, I am wrong. Yes, I didn</span>&rsquo;<span>t explicitly mention in the</span>
+<span>readme that I am not going to add a backdoor. Still, there is a basic, implicit expectation about</span>
+<span>software security, and it is wrong for me to violate it without an explicit mention.</span></p>
+<p><span>So I think the default expectations for a published open-source project boil down to:</span></p>
+<ul>
+<li>
+<span>As a maintainer, I can do absolutely nothing, and that</span>&rsquo;<span>s OK.</span>
+</li>
+<li>
+<span>At the same time, I can not be actively hostile to my users.</span>
+</li>
+<li>
+<span>I can spell out any extra carve-outs in either direction in my README.md.</span>
+<span>E.g., if I promise that releases follow SemVer, I should try to make it so! Conversely, if I am</span>
+<span>implementing my own crypto for fun for credentials-handling software, it</span>&rsquo;<span>s ok for me to just</span>
+<span>prominently mention that in the documentation.</span>
+</li>
+</ul>
+<p><span>What about the license? Doesn</span>&rsquo;<span>t it say that THE SOFTWARE IS PROVIDED </span>&ldquo;<span>AS IS</span>&rdquo;<span>, WITHOUT WARRANTY OF</span>
+<span>ANY KIND, EXPRESS OR IMPLIED?</span></p>
+<p><span>It does, but that</span>&rsquo;<span>s a statement about legality, not ethicality. If my readme says that my software</span>
+<span>is fit for a particular purpose, while it actually (and subtly) isn</span>&rsquo;<span>t in a big way, my users have</span>
+<span>the moral right to be mad at me. They don</span>&rsquo;<span>t have the legal right to sue me though.</span></p>
+<p><span>So, if you, as an open-source maintainer, publish your software and gain users, you should ask</span>
+<span>yourself: </span>&ldquo;<span>do I actually want to have users?</span>&rdquo;<span>. It is totally fine if the answer is </span>&ldquo;<span>no</span>&rdquo;<span>! It is a</span>
+<span>safe default answer and what governs most of the git repositories out there.</span></p>
+<p><span>Never the less, if the answer to question of users is </span>&ldquo;<span>no</span>&rdquo;<span>, you should make it clear in your Readme</span>
+<span>that it is a hobby, non-production-ready project which isn</span>&rsquo;<span>t intended to be used by anyone but you.</span>
+<span>Usually, it</span>&rsquo;<span>s enough to just not have a readme at all, or have a very short readme which makes it</span>
+<span>obvious that the project isn</span>&rsquo;<span>t supported.</span></p>
+<p><span>However, if you do have a nice README with installation instructions and such, that constitutes a</span>
+&ldquo;<span>yes</span>&rdquo;<span> answer. And then you, as a maintainer, are responsible for a tiny bit of life of your</span>
+<span>explicitly invited users. It</span>&rsquo;<span>s not expected that you do much (in fact, doing nothing is totally OK),</span>
+<span>but the amount of expectation is greater than zero.</span></p>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">LSP could have been better</title>
+<link href="https://matklad.github.io/2023/10/12/lsp-could-have-been-better.html" rel="alternate" type="text/html" title="LSP could have been better" />
+<published>2023-10-12T00:00:00+00:00</published>
+<updated>2023-10-12T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/10/12/lsp-could-have-been-better</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[We talk about programming like it is about writing code, but the code ends up being less important
+than the architecture, and the architecture ends up being less important than social issues.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/10/12/lsp-could-have-been-better.html"><![CDATA[
+    <h1>
+    <a href="#LSP-could-have-been-better"><span>LSP could have been better</span> <time datetime="2023-10-12">Oct 12, 2023</time></a>
+    </h1>
+
+<figure class="blockquote">
+<blockquote><p><span>We talk about programming like it is about writing code, but the code ends up being less important</span>
+<span>than the architecture, and the architecture ends up being less important than social issues.</span></p>
+</blockquote>
+<figcaption><cite><a href="https://neugierig.org/software/blog/2020/05/ninja.html"><span>The Success and Failure of Ninja</span></a></cite></figcaption>
+</figure>
+<p><span>The  </span><a href="https://matklad.github.io/2022/04/25/why-lsp.html"><em><span>Why LSP</span></em></a><span> post discusses the </span>&ldquo;<span>social</span>
+<span>issues</span>&rdquo;<span> solved by LSP. LSP (as a part of overarching Microsoft strategy) is brilliant, because it</span>
+<span>moved the world to a new equilibrium where not having basic IDE support is frowned upon. This post</span>
+<span>instead discusses architectural aspects of LSP, which I personally find not as brilliant(especially given that</span>
+<a href="https://htmlpreview.github.io/?https://github.com/dart-lang/sdk/blob/8e6a02d899ef62ef5b8405518b36340e609198e2/pkg/analysis_server/doc/api.html"><span>Dart Analysis Protocol</span></a>
+<span>predates LSP and is technically superior in some aspects). Perhaps it</span>
+<span>could be useful for someone designing other LSP-shaped protocols! Note that it</span>&rsquo;<span>s been couple of</span>
+<span>years since I was actively involved in LSP, probably the grass is greener these days!</span></p>
+<p><span>Let</span>&rsquo;<span>s get to the list of properties, good and bad, in no particular order.</span></p>
+<section id="Focus-on-Presentation">
+
+    <h2>
+    <a href="#Focus-on-Presentation"><span>Focus on Presentation</span> </a>
+    </h2>
+<p><span>And let</span>&rsquo;<span>s start with an aspect of the architecture which is genius, and which, I think, is</span>
+<span>responsible for a big share of LSP success on the technical side. If you build a tool for working</span>
+<span>with </span><em><span>multiple</span></em><span> programming languages, one of the biggest questions is how to find common ground</span>
+<span>among different, but ultimately similar, languages. A first attempt is to uncover essential</span>
+<span>commonality: after all, all languages have files, variables, functions, classes, right? This is </span>&hellip;
+<span>maybe not necessary a dead end, but definitely a thorny and treacherous path </span>&mdash;<span> languages are</span>
+<span>different, each language is weird in at least some of its aspects, and common ground risks to level</span>
+<span>away meaningful distinctions.</span></p>
+<p><span>So, what does LSP do here? It just doesn</span>&rsquo;<span>t provide a semantic model of the code base. Instead, it is</span>
+<span>focused squarely on the presentation. No matter how different each programming language is, they</span>
+<span>all, in the end, use the same completion widget. So LSP is formulated in terms of what</span>&rsquo;<span>s shown in</span>
+<span>the completion widget, not in terms of the underlying semantic language entities. That means that</span>
+<span>each language has an internal semantic model which is full fidelity </span><em><span>for this particular language</span></em><span>,</span>
+<span>and uses it to provide the best completion experience which is possible for a given completion</span>
+<span>widget. This is how rust-analyzer is structured internally as well:</span></p>
+<ol>
+<li>
+<span>Compiler layer deals with the messy language analysis tasks, it derives more structured</span>
+<span>information (types) from less structured information (source text), explicitly tracking analysis</span>
+<span>layers and phases.</span>
+</li>
+<li>
+<span>The HIR (high-level intermediate representation) is a façade around the compiler, which provides</span>
+<span>a rich graph-based object model of code which looks as if all derived information, like types, is</span>
+<span>pre-computed.</span>
+</li>
+<li>
+<span>The IDE layer uses HIR to compute things like completions, and presents them as Rust-specific,</span>
+<span>but semantics-less POD structures to be shown to the user in GUI more or less as is.</span>
+</li>
+</ol>
+<p><span>One consequence of this architecture is that LSP requests map to editor widgets, and not to the</span>
+<span>underlying language concepts, even when several different widgets are powered by the same underlying</span>
+<span>data. For example, LSP has separate requests for:</span></p>
+<ul>
+<li>
+<span>hierarchical outline of a file displayed in the side bar,</span>
+</li>
+<li>
+&ldquo;<span>breadcrumbs</span>&rdquo;<span> shown in the header,</span>
+</li>
+<li>
+<span>syntax-aware selection ranges,</span>
+</li>
+<li>
+<span>code folding.</span>
+</li>
+</ul>
+<p><span>Although all four features are just different views into an AST, there</span>&rsquo;<span>s no </span>&ldquo;<span>get AST</span>&rdquo;<span> request in the</span>
+<span>LSP. Different requests allow to fine-tune presentation for the  different use-cases, and the</span>
+<span>details do differ! Semantic selection might contain some sub-syntax ranges inside string literals</span>
+<span>and comments, breadcrumb need to include things like conditionals of </span><code>if</code><span> expressions, while the</span>
+<span>outline might want to get rid of less important nodes. Attentive reader will notice that breadcrumbs</span>
+<span>and the outline actually use the same LSP request. Even LSP doesn</span>&rsquo;<span>t follow LSP philosophy fully!</span></p>
+</section>
+<section id="Transport">
+
+    <h2>
+    <a href="#Transport"><span>Transport</span> </a>
+    </h2>
+<p><span>After a big thing that LSP did right, let</span>&rsquo;<span>s look at a small thing that it got wrong. Let</span>&rsquo;<span>s look at</span>
+<span>how information is transmitted over the wire.</span></p>
+<p><span>JSON is actually OK! Many people complain that JSON is slow, but that</span>&rsquo;<span>s not actually the case</span>
+<span>generally. There are some edge cases, where particular client libraries can be slow as was the case</span>
+<span>at least at some point with Swift and Emacs, but JSON is definitely fast enough for Rust, Java and</span>
+<span>JavaScript. Of course, something substantially better than JSON is possible in </span><em><span>theory</span></em><span>.</span></p>
+<p><span>I think ideally we need </span>&ldquo;<span>WebAssembly for IPC</span>&rdquo;<span>, a format that:</span></p>
+<ul>
+<li>
+<span>has dual text and binary encoding,</span>
+</li>
+<li>
+<span>is stupidly simple,</span>
+</li>
+<li>
+<span>is thoroughly, readably, and precisely specified,</span>
+</li>
+<li>
+<span>and, in general, is principled and a joy to use.</span>
+</li>
+</ul>
+<p><span>There</span>&rsquo;<span>s no such format yet, so JSON it is. Good enough.</span></p>
+<p><span>HTTP framing is not OK. On the wire, the messages framed like this:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">Content-Length: 92 \r\n</span>
+<span class="line">\r\n</span>
+<span class="line">Actual message</span></code></pre>
+
+</figure>
+<p><span>That is:</span></p>
+<ul>
+<li>
+<span>case-insensitive </span>&ldquo;<span>content-length</span>&rdquo;<span> header,</span>
+</li>
+<li>
+<span>followed by length of the following message, formatted as a decimal number in ASCII,</span>
+</li>
+<li>
+<span>followed by double </span><code>\r\n</code><span>,</span>
+</li>
+<li>
+<span>followed by the actual message.</span>
+</li>
+</ul>
+<p><span>This resembles HTTP, but is not actual HTTP, so you need to write a bit of custom code to deal</span>
+<span>with the framing. That</span>&rsquo;<span>s not hard:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">size</span> = <span class="hl-literal">None</span>;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">buf</span> = <span class="hl-type">String</span>::<span class="hl-title function_ invoke__">new</span>();</span>
+<span class="line">  <span class="hl-keyword">loop</span> {</span>
+<span class="line">    buf.<span class="hl-title function_ invoke__">clear</span>();</span>
+<span class="line">    <span class="hl-keyword">if</span> inp.<span class="hl-title function_ invoke__">read_line</span>(&amp;<span class="hl-keyword">mut</span> buf)? == <span class="hl-number">0</span> {</span>
+<span class="line">      <span class="hl-keyword">return</span> <span class="hl-title function_ invoke__">Ok</span>(<span class="hl-literal">None</span>);</span>
+<span class="line">    }</span>
+<span class="line">    <span class="hl-keyword">if</span> !buf.<span class="hl-title function_ invoke__">ends_with</span>(<span class="hl-string">&quot;\r\n&quot;</span>) {</span>
+<span class="line">      <span class="hl-keyword">return</span> <span class="hl-title function_ invoke__">Err</span>(invalid_data!(<span class="hl-string">&quot;malformed header: {:?}&quot;</span>, buf));</span>
+<span class="line">    }</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">buf</span> = &amp;buf[..buf.<span class="hl-title function_ invoke__">len</span>() - <span class="hl-number">2</span>];</span>
+<span class="line">    <span class="hl-keyword">if</span> buf.<span class="hl-title function_ invoke__">is_empty</span>() {</span>
+<span class="line">      <span class="hl-keyword">break</span>;</span>
+<span class="line">    }</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">parts</span> = buf.<span class="hl-title function_ invoke__">splitn</span>(<span class="hl-number">2</span>, <span class="hl-string">&quot;: &quot;</span>);</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">header_name</span> = parts.<span class="hl-title function_ invoke__">next</span>().<span class="hl-title function_ invoke__">unwrap</span>();</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">header_value</span> = parts.<span class="hl-title function_ invoke__">next</span>().<span class="hl-title function_ invoke__">ok_or_else</span>(|| {</span>
+<span class="line">      invalid_data!(<span class="hl-string">&quot;malformed header: {:?}&quot;</span>, buf)</span>
+<span class="line">    })?;</span>
+<span class="line">    <span class="hl-keyword">if</span> header_name.<span class="hl-title function_ invoke__">eq_ignore_ascii_case</span>(<span class="hl-string">&quot;Content-Length&quot;</span>) {</span>
+<span class="line">      size = <span class="hl-title function_ invoke__">Some</span>(</span>
+<span class="line">        header_value.parse::&lt;<span class="hl-type">usize</span>&gt;().<span class="hl-title function_ invoke__">map_err</span>(invalid_data)?,</span>
+<span class="line">      );</span>
+<span class="line">    }</span>
+<span class="line">  }</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">size</span>: <span class="hl-type">usize</span> =</span>
+<span class="line">    size.<span class="hl-title function_ invoke__">ok_or_else</span>(|| invalid_data!(<span class="hl-string">&quot;no Content-Length&quot;</span>))?;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">buf</span> = buf.<span class="hl-title function_ invoke__">into_bytes</span>();</span>
+<span class="line">  buf.<span class="hl-title function_ invoke__">resize</span>(size, <span class="hl-number">0</span>);</span>
+<span class="line">  inp.<span class="hl-title function_ invoke__">read_exact</span>(&amp;<span class="hl-keyword">mut</span> buf)?;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">buf</span> = <span class="hl-type">String</span>::<span class="hl-title function_ invoke__">from_utf8</span>(buf).<span class="hl-title function_ invoke__">map_err</span>(invalid_data)?;</span></code></pre>
+
+</figure>
+<p><span>But, still, decoding ASCII message length from variable-length header? That</span>&rsquo;<span>s accidental complexity.</span>
+<span>Just separate json objects with newlines instead:</span></p>
+<p><a href="https://jsonlines.org" class="url">https://jsonlines.org</a></p>
+<p><span>Framing using </span><code>\n</code><span> as a separator is almost certainly available out of the box in the programming</span>
+<span>language of choice.</span></p>
+<p><span>Wiping away the tears and peeling one more layer from the onion, we see json-rpc:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-punctuation">{</span></span>
+<span class="line">    <span class="hl-attr">&quot;jsonrpc&quot;</span><span class="hl-punctuation">:</span> <span class="hl-string">&quot;2.0&quot;</span><span class="hl-punctuation">,</span></span>
+<span class="line">    <span class="hl-attr">&quot;method&quot;</span><span class="hl-punctuation">:</span> <span class="hl-string">&quot;initialize&quot;</span><span class="hl-punctuation">,</span></span>
+<span class="line">    <span class="hl-attr">&quot;id&quot;</span><span class="hl-punctuation">:</span> <span class="hl-number">1</span><span class="hl-punctuation">,</span></span>
+<span class="line">    <span class="hl-attr">&quot;params&quot;</span><span class="hl-punctuation">:</span> <span class="hl-punctuation">{</span> ... <span class="hl-punctuation">}</span></span>
+<span class="line"><span class="hl-punctuation">}</span></span></code></pre>
+
+</figure>
+<p><span>This again is a bit of needless accidental complexity. Again, not hard to handle:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">_write</span>(<span class="hl-keyword">self</span>, w: &amp;<span class="hl-keyword">mut</span> <span class="hl-keyword">dyn</span> Write) <span class="hl-punctuation">-&gt;</span> io::<span class="hl-type">Result</span>&lt;()&gt; {</span>
+<span class="line">  <span class="hl-meta">#[derive(Serialize)]</span></span>
+<span class="line">  <span class="hl-keyword">struct</span> <span class="hl-title class_">JsonRpc</span> {</span>
+<span class="line">    jsonrpc: &amp;<span class="hl-symbol">&#x27;static</span> <span class="hl-type">str</span>,</span>
+<span class="line">    <span class="hl-meta">#[serde(flatten)]</span></span>
+<span class="line">    msg: Message,</span>
+<span class="line">  }</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">text</span> = serde_json::<span class="hl-title function_ invoke__">to_string</span>(&amp;JsonRpc {</span>
+<span class="line">    jsonrpc: <span class="hl-string">&quot;2.0&quot;</span>,</span>
+<span class="line">    msg: <span class="hl-keyword">self</span>,</span>
+<span class="line">  })?;</span>
+<span class="line">  <span class="hl-title function_ invoke__">write_msg_text</span>(w, &amp;text)</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>But:</span></p>
+<ul>
+<li>
+<span>Prone to complexity amplification, invites jsonrpc framework with all the latest patterns.</span>
+</li>
+<li>
+<code>"jsonrpc": "2.0"</code><span> is meaningless noise which you have to look at during debugging.</span>
+</li>
+<li>
+<span>Error codes like </span><code>-32601</code><span> (ah, that comes from xml-rpc!).</span>
+</li>
+<li>
+<span>Includes notifications. Notification are a big anti-pattern in RPC, for a somewhat subtle reason.</span>
+<span>More on this later.</span>
+</li>
+</ul>
+<p><span>What to do instead? Do what Dart does, some excerpts from </span><a href="https://htmlpreview.github.io/?https://github.com/dart-lang/sdk/blob/8e6a02d899ef62ef5b8405518b36340e609198e2/pkg/analysis_server/doc/api.html"><span>the specification</span></a><span>:</span></p>
+
+<figure class="blockquote">
+<blockquote><p><span>Messages are delineated by newlines. This means,</span>
+<span>in particular, that the JSON encoding process must not introduce newlines within a message. Note</span>
+<span>however that newlines are used in this document for readability.</span></p>
+<p><span>To ease interoperability with Lisp-based clients (which may not be able to easily distinguish</span>
+<span>between empty lists, empty maps, and null), client-to-server communication is allowed to replace any</span>
+<span>instance of </span>&ldquo;<code>{}</code>&rdquo;<span> or </span>&ldquo;<code>[]</code>&rdquo;<span> with null. The server will always properly represent empty lists as </span>&ldquo;<code>[]</code>&rdquo;
+<span>and empty maps as </span>&ldquo;<code>{}</code>&rdquo;<span>.</span></p>
+<p><span>Clients can make a request of the server and the server will provide a response for each request</span>
+<span>that it receives. </span><strong><span>While many of the requests that can be made by a client are informational in</span>
+<span>nature, we have chosen to always return a response so that clients can know whether the request was</span>
+<span>received and was correct.</span></strong></p>
+<p><span>Example request:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">request: {</span>
+<span class="line">  "id": String</span>
+<span class="line">  "method": "server.getVersion"</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line">response: {</span>
+<span class="line">  "id": String</span>
+<span class="line">  "error": optional RequestError</span>
+<span class="line">  "result": {</span>
+<span class="line">    "version": String</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+</blockquote>
+
+</figure>
+<p><span>That</span>&rsquo;<span>s basically jsonrpc, the good parts, including using </span><code>"UNKNOWN_REQUEST"</code><span> instead of </span><code>-32601</code><span>.</span></p>
+</section>
+<section id="Coordinates">
+
+    <h2>
+    <a href="#Coordinates"><span>Coordinates</span> </a>
+    </h2>
+<p><span>LSP uses </span><code>(line, column)</code><span> pairs for coordinates. The neat thing here is that this solves significant</span>
+<span>chunk of </span><code>\n</code><span> vs </span><code>\r\n</code><span> problems </span>&mdash;<span> client and server may represent line endings differently, but</span>
+<span>this doesn</span>&rsquo;<span>t matter, because coordinates are the same.</span></p>
+<p><span>Focus on the presentation provides another motivation, because location information received by the</span>
+<span>client can be directly presented to the user, without the need to parse the underlying file. I have</span>
+<span>mixed feelings about this.</span></p>
+<p><span>The problem, </span><code>column</code><span> is counted using UTF-16 code units. This is, like, </span>&ldquo;<span>no</span>&rdquo;<span>. For many reasons,</span>
+<span>but in particular, UTF-16 is definitely the wrong number to show to the user as a </span>&ldquo;<span>column</span>&rdquo;<span>.</span></p>
+<p><span>There</span>&rsquo;<span>s no entirely obvious answer what should be used instead. My personal favorite would be</span>
+<span>counting utf-8 code units (so, just bytes). You need </span><em><span>some</span></em><span> coordinate space. Any reasonable</span>
+<span>coordinate space won</span>&rsquo;<span>t be useful for presentation, so you might as well use the space that matches</span>
+<span>the underlying utf-8 encoding, so that accessing substrings is O(1).</span></p>
+<p><span>Using unicode codepoints would perhaps be the most agreeable solution. Codepoints are useless </span>&mdash;
+<span>you</span>&rsquo;<span>ll need to convert to grapheme clusters for presentation, and to utf-8 code units to do anything</span>
+<span>with the string. Still, codepoints are a common denominator, they are more often correct if</span>
+<span>incorrectly used for presentation, and they have a nice property that any index less then length is</span>
+<span>valid irrespective of the actual string.</span></p>
+</section>
+<section id="Causality-Casualty">
+
+    <h2>
+    <a href="#Causality-Casualty"><span>Causality Casualty</span> </a>
+    </h2>
+<p><span>As mentioned above, one drawback of one-way notifications from jsonrpc is that they don</span>&rsquo;<span>t allow</span>
+<span>signaling errors. But there</span>&rsquo;<span>s a more subtle problem here: because you don</span>&rsquo;<span>t receive response to a</span>
+<span>notification, it might be hard to order it relative to other events. The Dart protocol is pretty</span>
+<span>strict about the ordering of events:</span></p>
+
+<figure class="blockquote">
+<blockquote><p><span>There is no guarantee concerning the order in which responses will be returned, but there is a</span>
+<span>guarantee that the server will process requests in the order in which they are sent as long as the</span>
+<span>transport mechanism also makes this guarantee.</span></p>
+</blockquote>
+
+</figure>
+<p><span>This guarantee ensures that the client and the server mutually understand each other</span>&rsquo;<span>s state. For</span>
+<span>every request the client knows which file modifications happened before it, and which came afterwards.</span></p>
+<p><span>In LSP, when the client wants to modify the state of a file on the server, it sends a notification.</span>
+<span>LSP also supports server-initiated edits. Now, if the client sends a </span><code>didChangeTextDocument</code>
+<span>notification, and then receives a </span><code>workspace/applyEdit</code><span> request from the server, there</span>&rsquo;<span>s no way for</span>
+<span>the client to know whether the edit takes the latest change into the account or not. Were</span>
+<code>didChangeTextDocument</code><span> a request instead, the client could have looked at the relative order of the</span>
+<span>corresponding response and </span><code>workspace/applyEdit</code><span>.</span></p>
+<p><span>LSP papers over this fundamental loss of causality by including numeric versions of the documents</span>
+<span>with every edit, but this is a best effort solution. Edits might be invalidated by changes to</span>
+<span>unrelated documents. For example, for a rename refactor, if a new usage was introduced in a new file</span>
+<span>after the refactor was computed, version numbers of the changed files would wrongly tell you that</span>
+<span>the edit is still correct, while it will miss this new usage.</span></p>
+<p><span>Practically, this is a small problem </span>&mdash;<span> it works most of the  time (I </span><em><span>think</span></em><span> I have seen zero</span>
+<span>actual bugs caused by causality loss), and even the proper solution can</span>&rsquo;<span>t order events originating</span>
+<span>from the client relative to the events originating from the file system. But the fix is also very</span>
+<span>simple </span>&mdash;<span> just don</span>&rsquo;<span>t voluntarily lose causality links!</span></p>
+</section>
+<section id="Remote-Procedural-State-Synchronization">
+
+    <h2>
+    <a href="#Remote-Procedural-State-Synchronization"><span>Remote Procedural State Synchronization</span> </a>
+    </h2>
+<p><span>And this touches what I think is the biggest architectural issue with LSP. LSP is an RPC protocol</span>
+&mdash;<span> it is formed by </span>&ldquo;<span>edge triggered</span>&rdquo;<span> requests that make something happen on the other side. But this</span>
+<span>is not how most of IDE features work. What actually is needed is </span>&ldquo;<span>level triggered</span>&rdquo;<span> </span><strong><span>state</span>
+<span>synchronization</span></strong><span>. The client and the server need to agree what something </span><em><span>is</span></em><span>, deciding the course</span>
+<span>of action is secondary. It is </span>&ldquo;<span>to be or not to be</span>&rdquo;<span> rather than </span>&ldquo;<span>what is to be done</span>&rdquo;<span>.</span></p>
+<p><span>At the bottom is synchronization of text documents </span>&mdash;<span> the server and the client need to agree which</span>
+<span>files there are, and what is their content.</span></p>
+<p><span>Above is synchronization of derived data. For example, there</span>&rsquo;<span>s a set of errors in the project. This</span>
+<span>set changes when the underlying text files change. Errors change with some lag, as it takes time to</span>
+<span>compute them (and sometimes files changes faster than the errors could be re-computed).</span></p>
+<p><span>Things like file outline, syntax highlighting, cross-reference information, e.t.c, all follow the</span>
+<span>same pattern.</span></p>
+<p><span>Crucially, predicting which changes to the source invalidate which derived data requires language</span>
+<span>specific knowledge. Changing the text of </span><code>foo.rs</code><span> might affect syntax highlighting in </span><code>bar.rs</code><span> (as</span>
+<span>syntax highlighting is affected by types).</span></p>
+<p><span>In LSP, highlighting and such are requests. This means that either the client is incorrect and shows</span>
+<span>stale highlighting results, or it conservatively re-queries all highlighting results after every</span>
+<span>change, wasting the CPU, and </span><em><span>still</span></em><span> showing stale results sometimes, when an update happens outside</span>
+<span>of the client (eg, when </span><code>cargo</code><span> finished downloading external crates).</span></p>
+<p><span>The Dart model is more flexible, performant and elegant. Instead of highlighting being a request, it</span>
+<span>is a </span><em><span>subscription</span></em><span>. The client subscribes to syntax highlighting of particular files, the server</span>
+<span>notifies the client whenever highlights for the selected files change. That is, two pieces of state</span>
+<span>are synchronized between the client and the server:</span></p>
+<ul>
+<li>
+<span>The set of file the client is subscribed to</span>
+</li>
+<li>
+<span>The actual state of syntax highlighting for these files.</span>
+</li>
+</ul>
+<p><span>The former is synchronized by sending the whole </span>&ldquo;<span>current set</span>&rdquo;<span> of files in a request, whenever the</span>
+<span>set changes. The latter is synchronized by sending incremental updates.</span></p>
+<p><span>Subscriptions are granular both in terms of the file set, as well as in terms of features. The</span>
+<span>client might subscribe for errors in the whole project, and for highlights in the currently opened</span>
+<span>documents only.</span></p>
+<p><span>Subscriptions are implemented in terms of RPC, but they are an overarching organizational pattern</span>
+<span>followed by the majority of the requests. LSP doesn</span>&rsquo;<span>t have an equivalent, and has real bugs with</span>
+<span>outdated information shown to the user.</span></p>
+<p><span>I don</span>&rsquo;<span>t think Dart goes as far as possible here. JetBrains Rider, if I understand correctly, does</span>
+<span>something smarter:</span></p>
+<p><a href="https://www.codemag.com/Article/1811091/Building-a-.NET-IDE-with-JetBrains-Rider" class="url">https://www.codemag.com/Article/1811091/Building-a-.NET-IDE-with-JetBrains-Rider</a></p>
+<p><span>I think the idea behind the rider protocol is that you directly define the state you want to</span>
+<span>synchronize between the client and the server as state. The protocol then manages </span>&ldquo;<span>magic</span>&rdquo;
+<span>synchronization of the state by sending minimal diffs.</span></p>
+</section>
+<section id="Simplistic-Refactorings">
+
+    <h2>
+    <a href="#Simplistic-Refactorings"><span>Simplistic Refactorings</span> </a>
+    </h2>
+<p><span>Let</span>&rsquo;<span>s unwind to something more down to earth, like refactorings. Not the simple ones, like rename,</span>
+<span>but complex ones, like </span>&ldquo;<span>change signature</span>&rdquo;<span>:</span></p>
+<p><a href="https://www.jetbrains.com/idea/guide/tips/change-signature/" class="url">https://www.jetbrains.com/idea/guide/tips/change-signature/</a></p>
+<p><span>In this refactoring, the user selects a function declaration, then rearranges</span>
+<span>parameters in some way (reorders, removes, adds, renames, changes types, whatever), and then the IDE</span>
+<span>fixes all call-sites.</span></p>
+<p><span>The thing that makes this refactor complex is that it is interactive </span>&mdash;<span> it</span>&rsquo;<span>s not an atomic request</span>
+&ldquo;<span>rename </span><code>foo</code><span> to </span><code>bar</code>&rdquo;<span>, it</span>&rsquo;<span>s a dialog between the IDE and the user. There are many parameters that</span>
+<span>the user tweaks based on the analysis of the original code and the already specified aspects of the</span>
+<span>refactoring.</span></p>
+<p><span>LSP doesn</span>&rsquo;<span>t support this workflows. Dart somewhat supports them, though each refactoring gets to use</span>
+<span>custom messages (that is, there</span>&rsquo;<span>s quite good overall protocol for multistep refactorings, but each</span>
+<span>refactoring essentially sends </span><code>any</code><span> over the wire, and the IDE on the other side hard-codes specific</span>
+<span>GUIs for specific refactorings). This per-refactoring work is not nice, but it is much better than</span>
+<span>not having these complex refactorings at all.</span></p>
+</section>
+<section id="Dynamic-Registration">
+
+    <h2>
+    <a href="#Dynamic-Registration"><span>Dynamic Registration</span> </a>
+    </h2>
+<p><span>A small one to conclude. Significant chunk of conceptual LSP complexity comes from support for</span>
+<span>dynamic registration of capabilities. I don</span>&rsquo;<span>t understand why that features is there, rust-analyzer</span>
+<span>uses dynamic registration only for specifying which files should be watched. And that would be much</span>
+<span>simpler if it used a plain request (or a subscription mechanism).</span></p>
+</section>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">UNIX Structured Concurrency</title>
+<link href="https://matklad.github.io/2023/10/11/unix-structured-concurrency.html" rel="alternate" type="text/html" title="UNIX Structured Concurrency" />
+<published>2023-10-11T00:00:00+00:00</published>
+<updated>2023-10-11T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/10/11/unix-structured-concurrency</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[A short note on a particular structured concurrency pattern for UNIX systems programming.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/10/11/unix-structured-concurrency.html"><![CDATA[
+    <h1>
+    <a href="#UNIX-Structured-Concurrency"><span>UNIX Structured Concurrency</span> <time datetime="2023-10-11">Oct 11, 2023</time></a>
+    </h1>
+<p><span>A short note on a particular structured concurrency pattern for UNIX systems programming.</span></p>
+<section id="The-pattern">
+
+    <h2>
+    <a href="#The-pattern"><span>The pattern</span> </a>
+    </h2>
+
+<aside class="block">
+
+<p><span>If you have a parent process and a child process, and want to ensure that, when the parent</span>
+<span>stops, the child is stopped as well, consider using </span>&ldquo;<span>stdin is closed</span>&rdquo;<span> as an exit condition in the child.</span></p>
+
+</aside>
+  <p><span>That is, in the child process (which you control), do a blocking read on </span><code>stdin</code><span>, and exit promptly</span>
+<span>if the read returned zero bytes.</span></p>
+<p><span>Example of the pattern from one of the side hacks:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">main</span>() <span class="hl-punctuation">-&gt;</span> anyhow::<span class="hl-type">Result</span>&lt;()&gt; {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">args</span> = Args::<span class="hl-title function_ invoke__">parse</span>()?;</span>
+<span class="line"></span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">token</span> = CancellationToken::<span class="hl-title function_ invoke__">new</span>();</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">_guard</span> = token.<span class="hl-title function_ invoke__">clone</span>().<span class="hl-title function_ invoke__">drop_guard</span>();</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">_watchdog_thread</span> = std::thread::<span class="hl-title function_ invoke__">spawn</span>({</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">token</span> = token.<span class="hl-title function_ invoke__">clone</span>();</span>
+<span class="line">    <span class="hl-keyword">move</span> || <span class="hl-title function_ invoke__">run_watchdog</span>(token)</span>
+<span class="line">  });</span>
+<span class="line"></span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">tcp_socket</span> = TcpListener::<span class="hl-title function_ invoke__">bind</span>(args.addr.sock)?;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">udp_socket</span> = UdpSocket::<span class="hl-title function_ invoke__">bind</span>(args.addr.sock)?;</span>
+<span class="line">  <span class="hl-built_in">println!</span>(<span class="hl-string">&quot;listening on {}&quot;</span>, args.addr.sock);</span>
+<span class="line">  <span class="hl-title function_ invoke__">run</span>(args, &amp;token, tcp_socket, udp_socket)</span>
+<span class="line">}</span>
+<span class="line"></span>
+<span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">run_watchdog</span>(token: CancellationToken) {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">_guard</span> = token.<span class="hl-title function_ invoke__">drop_guard</span>();</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">stdin</span> = std::io::<span class="hl-title function_ invoke__">stdin</span>();</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">stdin</span> = stdin.<span class="hl-title function_ invoke__">lock</span>();</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">buf</span> = [<span class="hl-number">0</span>];</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">n</span> = stdin.<span class="hl-title function_ invoke__">read</span>(&amp;<span class="hl-keyword">mut</span> buf).<span class="hl-title function_ invoke__">unwrap</span>();</span>
+<span class="line">  <span class="hl-keyword">if</span> n != <span class="hl-number">0</span> {</span>
+<span class="line">    <span class="hl-built_in">panic!</span>(<span class="hl-string">&quot;unexpected input&quot;</span>);</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+</section>
+<section id="Context">
+
+    <h2>
+    <a href="#Context"><span>Context</span> </a>
+    </h2>
+<p><span>Two bits of background reading here:</span></p>
+<p><span>A famous </span><del><span>novel by Leo Tolstoy</span></del><span> blog post by njs:</span></p>
+<p><a href="https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/" class="url">https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/</a></p>
+<p><span>A less famous, but no less classic, gotchas.md from duct.py:</span></p>
+<p><a href="https://github.com/oconnor663/duct.py/blob/master/gotchas.md#killing-grandchild-processes" class="url">https://github.com/oconnor663/duct.py/blob/master/gotchas.md#killing-grandchild-processes</a></p>
+<p><span>It is often desirable to spawn a process, and make sure that, when the parent process exits, the</span>
+<span>child process is also killed. This can </span><em><span>not</span></em><span> be achieved using a pattern equivalent to</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">try {</span>
+<span class="line">    process = spawn(...)</span>
+<span class="line">} finally {</span>
+<span class="line">    _ = process.kill()</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>The parent process itself might be abruptly killed, and the finally blocks / destructors / atexit</span>
+<span>hooks are not run in this case.</span></p>
+<p><span>The natural habitat for this pattern are integration tests, where you often spawn external processes</span>
+<span>in large amounts, and expect occasional abrupt crashes.</span></p>
+<p><span>Sadly, as far as I know, UNIX doesn</span>&rsquo;<span>t provide an easy mechanism to bind the lifetimes of two</span>
+<span>processes thusly. There</span>&rsquo;<span>s process group mechanism, but it is one-level deep and is mostly reserved</span>
+<span>for the shell. There</span>&rsquo;<span>s </span><del><span>docker</span></del><span> cgroups, but that</span>&rsquo;<span>s a Linux-specific mechanism which isn</span>&rsquo;<span>t usually</span>
+<span>exposed by cross-platform standard libraries of various languages.</span></p>
+<p><span>The trick is using closed stdin as the signal for exit, as that is evenly supported by all platforms,</span>
+<span>doesn</span>&rsquo;<span>t require much code, and will do nearly the right thing most of the time.</span></p>
+<p><span>The drawbacks of this pattern:</span></p>
+<ul>
+<li>
+<span>It</span>&rsquo;<span>s cooperative in the child (you must control the code of the child process to inject the exit</span>
+<span>logic)</span>
+</li>
+<li>
+<span>It</span>&rsquo;<span>s somewhat cooperative in the parent: while exiting on standard input EOF will do the right</span>
+<span>thing most of the time, there are exceptions. For example, reading from </span><code>/dev/null</code><span> returns 0 (as</span>
+<span>opposed to blocking), and daemon processes often have their stdin set to </span><code>/dev/null</code><span>. Sadly,</span>
+<span>there</span>&rsquo;<span>s no </span><code class="display">/dev/reads-and-writes-block-forever</code>
+</li>
+<li>
+<span>It is not actually structured. Ideally, parent</span>&rsquo;<span>s exit should block on all descendants exiting, but</span>
+<span>that</span>&rsquo;<span>s not the case in this pattern. Still, it</span>&rsquo;<span>s good enough for cleaning up in tests!</span>
+</li>
+</ul>
+</section>
+]]></content>
+</entry>
+
+<entry>
+<title type="text">What is an Invariant?</title>
+<link href="https://matklad.github.io/2023/10/06/what-is-an-invariant.html" rel="alternate" type="text/html" title="What is an Invariant?" />
+<published>2023-10-06T00:00:00+00:00</published>
+<updated>2023-10-06T00:00:00+00:00</updated>
+<id>https://matklad.github.io/2023/10/06/what-is-an-invariant</id>
+<author><name>Alex Kladov</name></author>
+<summary type="html"><![CDATA[I extolled the benefits of programming with invariants in a couple of recent posts.
+Naturally, I didn't explain what I think when I write invariant. This post fixes that.]]></summary>
+<content type="html" xml:base="https://matklad.github.io/2023/10/06/what-is-an-invariant.html"><![CDATA[
+    <h1>
+    <a href="#What-is-an-Invariant"><span>What is an Invariant?</span> <time datetime="2023-10-06">Oct 6, 2023</time></a>
+    </h1>
+<p><span>I extolled the benefits of programming with invariants in a couple of recent posts.</span>
+<span>Naturally, I didn</span>&rsquo;<span>t explain what I think when I write </span>&ldquo;<span>invariant</span>&rdquo;<span>. This post fixes that.</span></p>
+<p><span>There are at least three different concepts I label with </span>&ldquo;<span>invariant</span>&rdquo;<span>:</span></p>
+<ul>
+<li>
+<span>a general </span>&ldquo;<span>math</span>&rdquo;<span> mode of thinking, where you distinguish between fuzzy, imprecise thoughts and</span>
+<span>precise statements with logical meaning.</span>
+</li>
+<li>
+<span>a specific technique for writing correct code when programming in the small.</span>
+</li>
+<li>
+<span>when programming in the large, compact, viral, descriptive properties of the systems.</span>
+</li>
+</ul>
+<p><span>I wouldn</span>&rsquo;<span>t discuss the first point here </span>&mdash;<span> I don</span>&rsquo;<span>t know how to describe this better than </span>&ldquo;<span>that</span>
+<span>thing that you do when you solve non-trivial math puzzler</span>&rdquo;<span>. The bulk of the post describes the</span>
+<span>second bullet point, for which I think I have a perfect litmus test to explain exactly what I am</span>
+<span>thinking here. I also touch a bit on the last point in the end.</span></p>
+<p><span>So let</span>&rsquo;<span>s start with a </span><a href="https://research.swtch.com/hwmm"><span>litmus test program</span></a><span> to show invariants in</span>
+<span>the small in action:</span></p>
+
+<aside class="block">
+
+<p><span>Write a binary search variation which computes insertion point </span>&mdash;<span> the smallest index such that, if</span>
+<span>the new element is inserted at this index, the array remains sorted:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">insertion_point</span>(xs: &amp;[<span class="hl-type">i32</span>], x: <span class="hl-type">i32</span>) <span class="hl-punctuation">-&gt;</span> <span class="hl-type">usize</span></span></code></pre>
+
+</figure>
+
+</aside>
+  <p><span>You might want to write one yourself before proceeding. Here</span>&rsquo;<span>s an </span><a href="https://matklad.github.io/2021/11/07/generate-all-the-things.html"><span>exhaustive</span>
+<span>test</span></a><span> for this functionality,</span>
+<span>using </span><a href="https://crates.io/crates/exhaustigen"><span>exhaustigen crate</span></a><span>:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">main</span>() {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">N</span> = <span class="hl-number">5</span>;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-variable">M</span> = <span class="hl-number">5</span>;</span>
+<span class="line"></span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">g</span> = exhaustigen::Gen::<span class="hl-title function_ invoke__">new</span>();</span>
+<span class="line">  <span class="hl-keyword">while</span> !g.<span class="hl-title function_ invoke__">done</span>() {</span>
+<span class="line">    <span class="hl-comment">// Generate an arbitrary sorted array of length at most M.</span></span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">xs</span> =</span>
+<span class="line">      (<span class="hl-number">0</span>..g.<span class="hl-title function_ invoke__">gen</span>(N)).<span class="hl-title function_ invoke__">map</span>(|_| g.<span class="hl-title function_ invoke__">gen</span>(M) <span class="hl-keyword">as</span> <span class="hl-type">i32</span>).collect::&lt;<span class="hl-type">Vec</span>&lt;_&gt;&gt;();</span>
+<span class="line">    xs.<span class="hl-title function_ invoke__">sort</span>();</span>
+<span class="line"></span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">x</span> = g.<span class="hl-title function_ invoke__">gen</span>(M) <span class="hl-keyword">as</span> <span class="hl-type">i32</span>;</span>
+<span class="line"></span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">i</span> = <span class="hl-title function_ invoke__">insertion_point</span>(&amp;xs, x);</span>
+<span class="line">    <span class="hl-keyword">if</span> i &gt; <span class="hl-number">0</span>        { <span class="hl-built_in">assert!</span>(xs[i - <span class="hl-number">1</span>] &lt; x) }</span>
+<span class="line">    <span class="hl-keyword">if</span> i &lt; xs.<span class="hl-title function_ invoke__">len</span>() { <span class="hl-built_in">assert!</span>(x &lt;= xs[i]) }</span>
+<span class="line">  }</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>Here</span>&rsquo;<span>s how I would naively write this function. First, I start with defining the boundaries for the</span>
+<span>binary search:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">insertion_point</span>(xs: &amp;[<span class="hl-type">i32</span>], x: <span class="hl-type">i32</span>) <span class="hl-punctuation">-&gt;</span> <span class="hl-type">usize</span> {</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">lo</span> = <span class="hl-number">0</span>;</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">hi</span> = xs.<span class="hl-title function_ invoke__">len</span>();</span>
+<span class="line">    ...</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>Then, repeatedly cut the interval in half until it vanishes</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">    <span class="hl-keyword">while</span> hi &gt; lo {</span>
+<span class="line">        <span class="hl-keyword">let</span> <span class="hl-variable">mid</span> = lo + (hi - lo) / <span class="hl-number">2</span>;</span>
+<span class="line">        ...</span>
+<span class="line">    }</span></code></pre>
+
+</figure>
+<p><span>and recur into the left or the right half accordingly:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">        <span class="hl-keyword">if</span> x &lt; xs[mid] {</span>
+<span class="line">            lo = mid;</span>
+<span class="line">        } <span class="hl-keyword">else</span> {</span>
+<span class="line">            hi = mid;</span>
+<span class="line">        }</span></code></pre>
+
+</figure>
+<p><span>Altogether:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">fn</span> <span class="hl-title function_">insertion_point</span>(xs: &amp;[<span class="hl-type">i32</span>], x: <span class="hl-type">i32</span>) <span class="hl-punctuation">-&gt;</span> <span class="hl-type">usize</span> {</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">lo</span> = <span class="hl-number">0</span>;</span>
+<span class="line">  <span class="hl-keyword">let</span> <span class="hl-keyword">mut </span><span class="hl-variable">hi</span> = xs.<span class="hl-title function_ invoke__">len</span>();</span>
+<span class="line"></span>
+<span class="line">  <span class="hl-keyword">while</span> lo &lt; hi {</span>
+<span class="line">    <span class="hl-keyword">let</span> <span class="hl-variable">mid</span> = lo + (hi - lo) / <span class="hl-number">2</span>;</span>
+<span class="line">    <span class="hl-keyword">if</span> x &lt; xs[mid] {</span>
+<span class="line">      hi = mid;</span>
+<span class="line">    } <span class="hl-keyword">else</span> {</span>
+<span class="line">      lo = mid;</span>
+<span class="line">    }</span>
+<span class="line">  }</span>
+<span class="line"></span>
+<span class="line">  lo</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<p><span>I love this code! It has so many details right!</span></p>
+<ul>
+<li>
+<span>The </span><code>insertion_point</code><span> interface compactly compresses usually messy result of a binary search to</span>
+<span>just one index.</span>
+</li>
+<li>
+<code>xs / x</code><span> pair of names for the sequence and its element crisply describes abstract algorithm on</span>
+<span>sequencies.</span>
+</li>
+<li>
+<span>Similarly, </span><code>lo / hi</code><span> name pair is symmetric, expressing the relation between the two indexes.</span>
+</li>
+<li>
+<span>Half-open intervals are used for indexing.</span>
+</li>
+<li>
+<span>There are no special casing anywhere, the natural </span><code>lo &lt; hi</code><span> condition handles empty slice.</span>
+</li>
+<li>
+<span>We even dodge Java</span>&rsquo;<span>s binary search bug by computing midpoint without overflow.</span>
+</li>
+</ul>
+<p><span>There</span>&rsquo;<span>s only one problem with this code </span>&mdash;<span> it doesn</span>&rsquo;<span>t work. Just blindly following rules-of-thumb</span>
+<span>gives you working code surprisingly often, but this particular algorithm is an exception.</span></p>
+<p><span>The question is, how do we fix this overwise great code? And here</span>&rsquo;<span>s where thinking invariants helps.</span>
+<span>Before I internalized invariants, my approach would be to find a failing example, and to fumble with</span>
+<span>some plus or minus ones here and there and other special casing to make it work. That is, find a</span>
+<span>concrete problem, solve it. This works, but is slow, and doesn</span>&rsquo;<span>t allow discovering the problem</span>
+<span>before running the code.</span></p>
+<p><span>The alternative is to actually make an effort and spell out, explicitly, what the code is supposed</span>
+<span>to do. In this case, we want </span><code>lo</code><span> and </span><code>hi</code><span> to bound the result. That is,</span>
+<code class="display">lo &lt;= insertion_point &lt;= hi</code>
+<span>should hold on every iteration. It clearly holds before we enter the loop. On each iteration, we</span>
+<span>would like to shorten this interval, cutting away the part that definitely does not contain</span>
+<span>insertion point.</span></p>
+<p><span>Elaborating the invariant, all elements to the left of </span><code>lo</code><span> should be less than the target.</span>
+<span>Conversely, all elements to the right of </span><code>hi</code><span> should be at least as large as the target.</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">for</span> <span class="hl-variable">i</span> <span class="hl-keyword">in</span> <span class="hl-number">0</span>..lo: xs[i] &lt; x</span>
+<span class="line"><span class="hl-keyword">for</span> <span class="hl-variable">i</span> <span class="hl-keyword">in</span> hi..:  x &lt;= xs[i]</span></code></pre>
+
+</figure>
+<p><span>Let</span>&rsquo;<span>s now take a second look at the branching condition:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line">x &lt; xs[mid]</span></code></pre>
+
+</figure>
+<p><span>It matches neither invariant prong exactly: </span><code>x</code><span> is on the left, but inequality is strict. We can</span>
+<span>rearrange the code to follow the invariant more closely:</span></p>
+
+<figure class="code-block">
+
+
+<pre><code><span class="line"><span class="hl-keyword">if</span> xs[mid] &lt; x {</span>
+<span class="line">    lo = mid + <span class="hl-number">1</span>;</span>
+<span class="line">} <span class="hl-keyword">else</span> {</span>
+<span class="line">    hi = mid;</span>
+<span class="line">}</span></code></pre>
+
+</figure>
+<ul>
+<li>
+<span>we flip the condition and if-branches, so that </span><code>xs[mid] &lt; x</code><span> matches </span><code>xs[i] &lt; x</code><span> from the</span>
+<span>invariant for </span><code>lo</code>
+</li>
+<li>
+<span>to make the invariant tight, we add </span><code>mid + 1</code><span> (if </span><code>xs[mid]</code><span> is less than </span><code>x</code><span>, we know that the</span>
+<span>insertion point is at least </span><code>mid + 1</code><span>)</span>
+</li>
+</ul>
+<p><span>The code now works. So what went wrong with the original version with </span><code>x &lt; xs[mid]</code><span>? In the else</span>
+<span>case, when </span><code>x &gt;= xs[mid]</code><span> we set </span><code>lo = mid</code><span>, but that</span>&rsquo;<span>s wrong! It might be the case that </span><code>x ==
+xs[mid]</code><span> and </span><code>x == xs[mid - 1]</code><span>, which would break the invariant for </span><code>lo</code><span>.</span></p>
+<p><span>The point isn</span>&rsquo;<span>t in this </span><em><span>particular</span></em><span> invariant or this particular algorithm. It</span>&rsquo;<span>s the general</span>
+<span>pattern that  it</span>&rsquo;<span>s easy to write the code which implements the right algorithm, and sort-of works,</span>
+<span>but is wrong in details. To get the details right for the right reason, you need to understand</span>
+<em><span>precisely</span></em><span> what the result should be, and formulating this as a (loop or recursion) invariant</span>
+<span>helps.</span></p>
+<hr>
+<p><span>Perhaps it</span>&rsquo;<span>s time to answer the title question: invariant is some property which holds at all times</span>
+<span>during dynamic evolution of the system. In the above example, the evolution is the program</span>
+<span>progressing through subsequent loop iterations. The invariant, the condition binding </span><code>lo</code><span> and </span><code>hi</code><span>,</span>
+<span>holds on every iteration. Invariants are powerful, because they are </span><em><span>compressed</span></em><span> descriptions of</span>
+<span>the system, they collapse away the time dimension, which is a huge simplification. Reasoning about</span>
+<span>each particular path the program could take is hard, because there are so many different paths.</span>
+<span>Reasoning about invariants is easy, because they capture properties shared by </span><em><span>all</span></em><span> execution paths.</span></p>
+<p><span>The same idea applies when programming in the large. In the small, we looked at how the state of a</span>
+<span>running program evolves over time. In the large, we will look at how the source code of the program</span>
+<span>itself evolves, as it is being refactored and extended to support new features. Here are some</span>
+<span>systems invariants from the systems I</span>&rsquo;<span>ve worked with:</span></p>
+<p><strong><span>Cargo:</span></strong></p>
+<p><span>File system paths entered by users are preserved exactly. If the user types</span>
+<span class="display"><code>cargo frob ../some/dir</code><span>,</span></span>
+<span>Cargo doesn</span>&rsquo;<span>t attempt to resolve </span><code>../some/dir</code><span> to an absolute path and passes the path</span>
+<span>to the underlying OS as is. The reason for that is that file systems are very finicky. Although it</span>
+<span>might look as if two paths are equivalent, there are bound to be cases where they are not. If the</span>
+<span>user typed a particular form of a path, they believe that it</span>&rsquo;<span>ll work, and any changes can mess</span>
+<span>things up easily.</span></p>
+<p><span>This is a relatively compact invariant </span>&mdash;<span> basically, code is just forbidden from calling</span>
+<code>fs::canonicalize</code><span>.</span></p>
+<p><strong><span>rust-analyzer:</span></strong></p>
+<p><span>Syntax trees are identity-less value types. That is, if you take an object representing an </span><code>if</code>
+<span>expression, that object doesn</span>&rsquo;<span>t have any knowledge of where in the larger program the </span><code>if</code>
+<span>expression is. The thinking about this invariant was that it simplifies refactors </span>&mdash;<span> while in the</span>
+<span>static program it</span>&rsquo;<span>s natural to talk about </span>&ldquo;<code>if</code><span> on the line X in file Y</span>&rdquo;<span>, when you start modifying</span>
+<span>code, identity becomes much more fluid.</span></p>
+<p><span>This is an invariant with far reaching consequences </span>&mdash;<span> that means that literally everything in</span>
+<span>rust-analyzer needs to track identities of things explicitly. You don</span>&rsquo;<span>t just pass around syntax</span>
+<span>nodes, you pass nodes with extra breadcrumbs describing their origin. I think this might have been a</span>
+<span>mistake </span>&mdash;<span> while it does make refactoring APIs more principled, refactoring is not the common case!</span>
+<span>Most of the work of a language server consists of read-only analysis of existing code, and the</span>
+<span>actual refactor is just a cherry on top. So perhaps it</span>&rsquo;<span>s better to try to bind identity mode tightly</span>
+<span>into the core data structure, and just use fake identities for temporary trees that arise during</span>
+<span>refactors.</span></p>
+<p><span>A more successful invariant from rust-analyzer is that the IDE has a full, frozen view of a snapshot</span>
+<span>of the world. There</span>&rsquo;<span>s no API for inferring the types, rather, the API looks as if all the types are</span>
+<span>computed at all times. Similarly, there</span>&rsquo;<span>s no explicit API for changing the code or talking about</span>
+<span>different historical versions of the code </span>&mdash;<span> the IDE sees a single </span>&ldquo;<span>current</span>&rdquo;<span> snapshot with all</span>
+<span>derived data computed. Underneath, there</span>&rsquo;<span>s a smart system to secretly compute the information on</span>
+<span>demand and re-use previous results, but this is all hidden from the API.</span></p>
+<p><span>This is a great, simple mental model, and it provides for a nice boundary between the compiler</span>
+<span>proper and IDE fluff like refactors and code completion. Long term, I</span>&rsquo;<span>d love to see several</span>
+<span>implementations of the </span>&ldquo;<span>compiler parts</span>&rdquo;<span>.</span></p>
+<p><strong><span>TigerBeetle:</span></strong></p>
+<p><span>A </span><em><span>lot</span></em><span> of thoughtful invariants here! To touch only a few:</span></p>
+<p><span>TigerBeetle doesn</span>&rsquo;<span>t allocate memory after startup. This simple invariant affects every bit of code</span>
+&mdash;<span> whatever you do, you must manage with existing, pre-allocated data structures. You can</span>&rsquo;<span>t just</span>
+<code>memcpy</code><span> stuff around, there</span>&rsquo;<span>s no ambient available space to </span><code>memcpy</code><span> to! As a consequence (and,</span>
+<span>historically, as a motivation for the design)</span>
+<a href="https://github.com/tigerbeetle/tigerbeetle/blob/cfb46eff4e001bb6b33f5e48924a2de44db20e8f/src/constants.zig#L417-L418"><span>everything</span></a>
+<span>has a specific numeric limit.</span></p>
+<p><span>Another fun one is that transaction logic can</span>&rsquo;<span>t read from disk. Every object which could be touched</span>
+<span>by a transaction needs to be explicitly prefetched into memory before transaction begins. Because</span>
+<span>disk IO happens separately from the execution, it is possible to parallelize IO for a whole batch of</span>
+<span>transactions. The actual transaction execution is then a very tight serial CPU loop without any</span>
+<span>locks.</span></p>
+<p><span>Speaking of disk IO, in TigerBeetle </span>&ldquo;<span>reading from disk</span>&rdquo;<span> can</span>&rsquo;<span>t fail. The central API for reading</span>
+<span>takes a data block address, a checksum, and invokes the callback with data with a matching checksum.</span>
+<span>Everything built on top doesn</span>&rsquo;<span>t need to worry about error handling. The way this works internally is</span>
+<span>that reads that fail on a local disk are repaired through other replicas in the cluster. It</span>&rsquo;<span>s just</span>
+<span>that the repair happens transparently to the caller. If the block of data of interest isn</span>&rsquo;<span>t found on</span>
+<span>the set of reachable replicas, the cluster correctly gets stuck until it is found.</span></p>
+<hr>
+<p><span>Summing up: invariants are helpful for describing systems that evolve over time. There</span>&rsquo;<span>s a</span>
+<span>combinatorial explosion of trajectories that a system </span><em><span>could</span></em><span> take. Invariants compactly describe</span>
+<span>properties shared by an infinite amount of trajectories.</span></p>
+<p><span>In the small, formulating invariants about program state helps to wire correct code.</span></p>
+<p><span>In the large, formulating invariants about the code itself helps to go from a small, simple system</span>
+<span>that works to a large system which is used in production.</span></p>
+]]></content>
+</entry>
+
+</feed>
